@@ -31,11 +31,55 @@ func TestPlanCompactionFoldFallsBackToActiveTurnCheckpoint(t *testing.T) {
 	if plan.kind != compactionFoldActiveTurn {
 		t.Fatalf("plan kind = %v, want active-turn checkpoint", plan.kind)
 	}
-	if plan.prefixEnd != 2 || plan.summaryStart != 1 {
-		t.Fatalf("plan prefix/summary = %d/%d, want 2/1", plan.prefixEnd, plan.summaryStart)
+	if plan.prefixEnd != 2 || plan.summaryStart != 0 {
+		t.Fatalf("plan prefix/summary = %d/%d, want 2/0", plan.prefixEnd, plan.summaryStart)
 	}
 	if plan.foldEnd <= plan.prefixEnd || plan.foldEnd >= len(msgs) {
 		t.Fatalf("fold end = %d, want completed work with a recent tail retained", plan.foldEnd)
+	}
+}
+
+func TestPlanCompactionFoldRetainsNewestToolGroup(t *testing.T) {
+	const activeCreatedAt = int64(42)
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: "system"},
+		{Role: provider.RoleUser, Content: "continue until fixed", CreatedAt: activeCreatedAt},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "old", Name: "read", Arguments: `{}`}}},
+		{Role: provider.RoleTool, ToolCallID: "old", Name: "read", Content: strings.Repeat("old output ", 3000)},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "live", Name: "grep", Arguments: `{}`}}},
+		{Role: provider.RoleTool, ToolCallID: "live", Name: "grep", Content: strings.Repeat("latest output ", 3000)},
+	}
+	a := &Agent{agentConfig: agentConfig{contextWindow: 8_000}}
+	a.activeTurnCreatedAt.Store(activeCreatedAt)
+
+	plan, ok := a.planCompactionFold(msgs, true)
+	if !ok {
+		t.Fatal("expected the older completed tool group to be foldable")
+	}
+	if plan.kind != compactionFoldActiveTurn {
+		t.Fatalf("plan kind = %v, want active-turn checkpoint", plan.kind)
+	}
+	if plan.foldEnd != 4 {
+		t.Fatalf("fold end = %d, want newest tool group retained from index 4", plan.foldEnd)
+	}
+	if msgs[plan.foldEnd].Role != provider.RoleAssistant || len(msgs[plan.foldEnd].ToolCalls) == 0 {
+		t.Fatalf("retained tail does not begin with the newest assistant tool call: %+v", msgs[plan.foldEnd])
+	}
+}
+
+func TestPlanCompactionFoldRejectsSingleIrreducibleToolGroup(t *testing.T) {
+	const activeCreatedAt = int64(42)
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: "system"},
+		{Role: provider.RoleUser, Content: "continue until fixed", CreatedAt: activeCreatedAt},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "live", Name: "read", Arguments: `{}`}}},
+		{Role: provider.RoleTool, ToolCallID: "live", Name: "read", Content: strings.Repeat("oversized output ", 3000)},
+	}
+	a := &Agent{agentConfig: agentConfig{contextWindow: 1_600}}
+	a.activeTurnCreatedAt.Store(activeCreatedAt)
+
+	if plan, ok := a.planCompactionFold(msgs, true); ok {
+		t.Fatalf("single live tool group must remain irreducible, got plan %+v", plan)
 	}
 }
 

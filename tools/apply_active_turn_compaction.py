@@ -115,6 +115,15 @@ def main() -> None:
 \t}
 
 \tcovered, bodySuffix := projectionCoverageForFold(stateSnapshot, msgs, plan.foldEnd, onProjection)
+\tif plan.kind == compactionFoldActiveTurn && onProjection &&
+\t\thasActiveTurnCheckpoint(stateSnapshot.Projection.Messages) &&
+\t\tcovered <= stateSnapshot.Projection.CoveredCount {
+\t\t// Rewriting only the prior checkpoint body cannot release new canonical
+\t\t// context. Refuse the no-progress transaction so pressure handling records
+\t\t// one durable block instead of spinning through checkpoint generations.
+\t\ta.emitCompactionAborted(trigger)
+\t\treturn CompactionNoop, nil
+\t}
 \tkept, removedFold, retention := a.partitionFoldForProjection(msgs[plan.prefixEnd:plan.foldEnd])
 \tif len(removedFold) == 0 {
 \t\ta.emitCompactionAborted(trigger)
@@ -135,9 +144,6 @@ def main() -> None:
 
 \tsourceTokens := a.estimatedVisibleRequestTokens(msgs)
 \tinputMode := SummaryInputCachePrefix
-\tif plan.kind == compactionFoldActiveTurn {
-\t\tinputMode = SummaryInputNonPrefix
-\t}
 \tif providerVisibleFingerprint(modelInputMessages(summaryFold)) != originalFoldHash {
 \t\tinputMode = SummaryInputExtensionRewritten
 \t}

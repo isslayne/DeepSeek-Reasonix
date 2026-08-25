@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: active-turn-checkpoint-compaction
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply-and-verify:
@@ -47,17 +47,18 @@ jobs:
             internal/agent/compact_active_turn_test.go
           git diff --check
 
-      - name: Run focused regression tests
+      - name: Run checkpoint and compatibility regressions
         run: >-
           go test ./internal/agent
-          -run 'Test(PlanCompactionFold|CompletedActiveTurnPrefixEnd|ActiveTurnCheckpoint)'
+          -run 'Test(PlanCompactionFold|CompletedActiveTurnPrefixEnd|ActiveTurnCheckpoint|TooSmallWindowReturnsCompactionRequired|CompactionPausesWhenWindowTooSmall)'
           -count=1
+          -timeout=2m
 
       - name: Run agent test suite
-        run: go test ./internal/agent -count=1
+        run: go test ./internal/agent -count=1 -timeout=15m
 
       - name: Run repository test suite
-        run: go test ./... -count=1
+        run: go test ./... -count=1 -timeout=20m
 
       - name: Run static checks
         shell: bash

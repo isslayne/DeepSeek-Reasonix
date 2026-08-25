@@ -79,7 +79,7 @@ func (a *Agent) planCompactionFold(msgs []provider.Message, force bool) (compact
 	}
 
 	foldStart := active + 1
-	foldEnd := completedActiveTurnPrefixEnd(msgs, foldStart, plannedEnd)
+	foldEnd := completedActiveTurnFoldEnd(msgs, foldStart, plannedEnd)
 	if foldEnd <= foldStart {
 		return compactionFoldPlan{}, false
 	}
@@ -88,18 +88,45 @@ func (a *Agent) planCompactionFold(msgs []provider.Message, force bool) (compact
 		return compactionFoldPlan{}, false
 	}
 	plan := compactionFoldPlan{
-		kind:         compactionFoldActiveTurn,
-		prefixEnd:    foldStart,
-		summaryStart: active,
+		kind:      compactionFoldActiveTurn,
+		prefixEnd: foldStart,
+		// Replay the exact model-visible prefix so the summary request remains
+		// eligible for provider prefix-cache reuse. The removal range remains
+		// active-turn-only; summary input and projection mutation are separate.
+		summaryStart: 0,
 		foldEnd:      foldEnd,
 	}
 	return plan, plan.valid(msgs)
+}
+
+// completedActiveTurnFoldEnd returns a safe completed prefix while retaining
+// at least one provider-visible resume anchor after the checkpoint. In
+// particular, the newest complete tool-call/result group stays verbatim. This
+// preserves the sampling protocol and prevents a synthetic continuation from
+// causing the model to repeat a tool call whose result was just summarized.
+func completedActiveTurnFoldEnd(msgs []provider.Message, start, limit int) int {
+	safe, lastUnitStart := completedActiveTurnBoundary(msgs, start, limit)
+	if safe <= start {
+		return start
+	}
+	if hasProviderVisibleMessage(msgs[safe:]) {
+		return safe
+	}
+	if lastUnitStart >= start {
+		return lastUnitStart
+	}
+	return start
 }
 
 // completedActiveTurnPrefixEnd returns the largest prefix ending on a safe
 // message boundary. It never crosses a later user-authored turn and never
 // splits an assistant tool_calls record from its complete result group.
 func completedActiveTurnPrefixEnd(msgs []provider.Message, start, limit int) int {
+	safe, _ := completedActiveTurnBoundary(msgs, start, limit)
+	return safe
+}
+
+func completedActiveTurnBoundary(msgs []provider.Message, start, limit int) (safe, lastUnitStart int) {
 	if start < 0 {
 		start = 0
 	}
@@ -107,10 +134,11 @@ func completedActiveTurnPrefixEnd(msgs []provider.Message, start, limit int) int
 		limit = len(msgs)
 	}
 	if start >= limit {
-		return start
+		return start, -1
 	}
 
-	safe := start
+	safe = start
+	lastUnitStart = -1
 	for i := start; i < limit; {
 		m := msgs[i]
 		if m.LocalOnly {
@@ -124,6 +152,7 @@ func completedActiveTurnPrefixEnd(msgs []provider.Message, start, limit int) int
 		if m.Role == provider.RoleTool {
 			break
 		}
+		unitStart := i
 		if m.Role == provider.RoleAssistant && len(m.ToolCalls) > 0 {
 			j := i + 1
 			for j < limit && msgs[j].Role == provider.RoleTool && !msgs[j].LocalOnly {
@@ -133,13 +162,33 @@ func completedActiveTurnPrefixEnd(msgs []provider.Message, start, limit int) int
 				break
 			}
 			safe = j
+			lastUnitStart = unitStart
 			i = j
 			continue
 		}
 		safe = i + 1
+		lastUnitStart = unitStart
 		i++
 	}
-	return safe
+	return safe, lastUnitStart
+}
+
+func hasProviderVisibleMessage(msgs []provider.Message) bool {
+	for _, msg := range msgs {
+		if !msg.LocalOnly {
+			return true
+		}
+	}
+	return false
+}
+
+func hasActiveTurnCheckpoint(msgs []provider.Message) bool {
+	for _, msg := range msgs {
+		if strings.HasPrefix(strings.TrimSpace(msg.Content), activeTurnCheckpointTagOpen) {
+			return true
+		}
+	}
+	return false
 }
 
 func toolCallGroupComplete(calls []provider.ToolCall, results []provider.Message) bool {
