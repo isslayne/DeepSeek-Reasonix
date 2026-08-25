@@ -41,16 +41,18 @@ jobs:
             exit 1
           fi
           python3 tools/apply_active_turn_compaction.py
+          python3 tools/update_active_turn_compaction_contract.py
           gofmt -w \
             internal/agent/compact_projection.go \
             internal/agent/compact_active_turn.go \
-            internal/agent/compact_active_turn_test.go
+            internal/agent/compact_active_turn_test.go \
+            internal/agent/cachehit_e2e_test.go
           git diff --check
 
       - name: Run checkpoint and compatibility regressions
         run: >-
           go test ./internal/agent
-          -run 'Test(PlanCompactionFold|CompletedActiveTurnPrefixEnd|ActiveTurnCheckpoint|TooSmallWindowReturnsCompactionRequired|CompactionPausesWhenWindowTooSmall)'
+          -run 'Test(PlanCompactionFold|CompletedActiveTurnPrefixEnd|ActiveTurnCheckpoint|SmallWindowUsesActiveTurnCheckpoints|CompactionPausesWhenWindowTooSmall)'
           -count=1
           -timeout=2m
 
@@ -73,6 +75,7 @@ jobs:
           set -euo pipefail
           git rm .github/workflows/apply-active-turn-compaction.yml
           git rm tools/apply_active_turn_compaction.py
+          git rm tools/update_active_turn_compaction_contract.py
           git add -A
           git diff --cached --check
           git config user.name "github-actions[bot]"
