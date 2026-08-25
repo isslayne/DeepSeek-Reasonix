@@ -30,7 +30,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Apply root-cause fix
+      - name: Apply root-cause fix and debug instrumentation
         shell: bash
         run: |
           set -euo pipefail
@@ -42,43 +42,19 @@ jobs:
           fi
           python3 tools/apply_active_turn_compaction.py
           python3 tools/update_active_turn_compaction_contract.py
+          python3 tools/debug_active_turn_overflow.py
           gofmt -w \
             internal/agent/compact_projection.go \
             internal/agent/compact_active_turn.go \
             internal/agent/compact_active_turn_test.go \
-            internal/agent/cachehit_e2e_test.go
+            internal/agent/cachehit_e2e_test.go \
+            internal/agent/context_recovery_tool_loop_test.go
           git diff --check
 
-      - name: Run checkpoint and compatibility regressions
+      - name: Diagnose overflow checkpoint progression
         run: >-
           go test ./internal/agent
-          -run 'Test(PlanCompactionFold|CompletedActiveTurnPrefixEnd|ActiveTurnCheckpoint|SmallWindowUsesActiveTurnCheckpoints|CompactionPausesWhenWindowTooSmall)'
+          -run '^TestToolLoopRetriesOnlyAfterOverflowMaintenanceProgress$'
           -count=1
           -timeout=2m
-
-      - name: Run agent test suite
-        run: go test ./internal/agent -count=1 -timeout=15m
-
-      - name: Run repository test suite
-        run: go test ./... -count=1 -timeout=20m
-
-      - name: Run static checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          go vet ./internal/agent
-          go run ./tools/repolint
-
-      - name: Commit verified fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm .github/workflows/apply-active-turn-compaction.yml
-          git rm tools/apply_active_turn_compaction.py
-          git rm tools/update_active_turn_compaction_contract.py
-          git add -A
-          git diff --cached --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix(context): checkpoint completed work inside active turns"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          -v
