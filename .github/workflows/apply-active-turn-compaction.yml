@@ -30,7 +30,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Apply root-cause fix and debug instrumentation
+      - name: Apply root-cause fix
         shell: bash
         run: |
           set -euo pipefail
@@ -42,7 +42,6 @@ jobs:
           fi
           python3 tools/apply_active_turn_compaction.py
           python3 tools/update_active_turn_compaction_contract.py
-          python3 tools/debug_active_turn_overflow.py
           gofmt -w \
             internal/agent/compact_projection.go \
             internal/agent/compact_active_turn.go \
@@ -51,10 +50,28 @@ jobs:
             internal/agent/context_recovery_tool_loop_test.go
           git diff --check
 
-      - name: Diagnose overflow checkpoint progression
-        run: >-
-          go test ./internal/agent
-          -run '^TestToolLoopRetriesOnlyAfterOverflowMaintenanceProgress$'
-          -count=1
-          -timeout=2m
-          -v
+      - name: Verify active-turn checkpoint integration
+        run: |
+          go test ./internal/agent -run 'Test(PlanCompactionFold|CompletedActiveTurnPrefixEnd|ActiveTurnCheckpoint|SmallWindowUsesActiveTurnCheckpoints|ToolLoopRetriesOnlyAfterOverflowMaintenanceProgress)' -count=1 -timeout=5m
+
+      - name: Verify full agent package
+        run: go test ./internal/agent -count=1 -timeout=10m
+
+      - name: Vet agent package
+        run: go vet ./internal/agent
+
+      - name: Commit verified implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/apply-active-turn-compaction.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add internal/agent/compact_projection.go \
+                  internal/agent/compact_active_turn.go \
+                  internal/agent/compact_active_turn_test.go \
+                  internal/agent/cachehit_e2e_test.go \
+                  internal/agent/context_recovery_tool_loop_test.go \
+                  .github/workflows/apply-active-turn-compaction.yml
+          git commit -m "fix(context): enable rolling active-turn checkpoints"
+          git push origin HEAD:${{ github.ref_name }}
