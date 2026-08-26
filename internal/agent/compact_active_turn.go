@@ -90,10 +90,15 @@ func (a *Agent) planCompactionFold(msgs []provider.Message, force bool) (compact
 	plan := compactionFoldPlan{
 		kind:      compactionFoldActiveTurn,
 		prefixEnd: foldStart,
-		// Replay the exact model-visible prefix so the summary request remains
-		// eligible for provider prefix-cache reuse. The removal range remains
-		// active-turn-only; summary input and projection mutation are separate.
-		summaryStart: 0,
+		// Summary admission must be bounded independently from the ordinary
+		// cache-aligned request prefix. Replaying msgs[:active] here can make a
+		// recovery summary impossible once the provider teaches us a smaller
+		// shared window: the immutable historical prefix alone may consume the
+		// summary budget. The active user request is the durable semantic anchor,
+		// so summarize from it plus completed work; summaryRequest will add the
+		// system message and tool schemas exactly once. This trades cache reuse at
+		// the exceptional recovery boundary for guaranteed bounded progress.
+		summaryStart: active,
 		foldEnd:      foldEnd,
 	}
 	return plan, plan.valid(msgs)
