@@ -42,6 +42,38 @@ jobs:
           fi
           python3 tools/apply_active_turn_compaction.py
           python3 tools/update_active_turn_compaction_contract.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          active = Path("internal/agent/compact_active_turn.go")
+          text = active.read_text()
+          old = "\tfoldEnd := completedActiveTurnFoldEnd(msgs, foldStart, plannedEnd)\n"
+          new = """\tfoldEnd := completedActiveTurnFoldEnd(msgs, foldStart, plannedEnd)
+\tif force {
+\t\t// Physical-overflow recovery must maximize reclaimed context. Once a
+\t\t// tool-call/result group is complete it is safe to checkpoint; retaining
+\t\t// the newest complete group can itself consume the learned provider
+\t\t// window and make the retry impossible. Normal pressure compaction still
+\t\t// keeps that newest group verbatim for cache/protocol locality.
+\t\tfoldEnd = completedActiveTurnPrefixEnd(msgs, foldStart, plannedEnd)
+\t}
+"""
+          if text.count(old) != 1:
+              raise SystemExit(f"active-turn force boundary: expected 1 match, got {text.count(old)}")
+          active.write_text(text.replace(old, new, 1))
+
+          tests = Path("internal/agent/compact_active_turn_test.go")
+          text = tests.read_text()
+          start = text.index("func TestPlanCompactionFoldRetainsNewestToolGroup")
+          end = text.index("func TestPlanCompactionFoldRejectsSingleIrreducibleToolGroup", start)
+          region = text[start:end]
+          old_call = "plan, ok := a.planCompactionFold(msgs, true)"
+          if region.count(old_call) != 1:
+              raise SystemExit(f"retain-newest contract: expected 1 match, got {region.count(old_call)}")
+          region = region.replace(old_call, "plan, ok := a.planCompactionFold(msgs, false)", 1)
+          text = text[:start] + region + text[end:]
+          tests.write_text(text)
+          PY
           gofmt -w \
             internal/agent/compact_projection.go \
             internal/agent/compact_active_turn.go \
