@@ -37,6 +37,44 @@ def update_cachehit() -> None:
     text = replace_once(text, '\t"errors"\n', "", "remove obsolete errors import")
     text = replace_once(
         text,
+        '''\tif isSummarizeRequest(body) {
+\t\tmsgs := decodeMessages(body)
+\t\treplayed := msgs[:len(msgs)-1]
+\t\tif len(m.prevMessages) > 0 && commonPrefixMsgs(m.prevMessages, replayed) != len(replayed) {
+\t\t\tm.t.Errorf("summary request did not replay a byte-identical cached conversation prefix")
+\t\t}
+\t\twriteSSE(w, m.t,
+''',
+        '''\tif isSummarizeRequest(body) {
+\t\tmsgs := decodeMessages(body)
+\t\treplayed := msgs[:len(msgs)-1]
+\t\tvar final struct {
+\t\t\tContent string `json:"content"`
+\t\t}
+\t\tif err := json.Unmarshal(msgs[len(msgs)-1], &final); err != nil {
+\t\t\tm.t.Errorf("decode summary instruction: %v", err)
+\t\t}
+\t\tactiveCheckpoint := strings.Contains(final.Content, activeTurnCheckpointInstruction)
+\t\tif len(m.prevMessages) > 0 {
+\t\t\tif activeCheckpoint {
+\t\t\t\t// Emergency active-turn recovery intentionally trades one cache reset
+\t\t\t\t// for a bounded request. Its immutable semantic prefix is the system
+\t\t\t\t// message plus the original active user task, both byte-identical.
+\t\t\t\tif len(m.prevMessages) < 2 || len(replayed) < 2 ||
+\t\t\t\t\t!bytes.Equal(m.prevMessages[0], replayed[0]) ||
+\t\t\t\t\t!bytes.Equal(m.prevMessages[1], replayed[1]) {
+\t\t\t\t\tm.t.Errorf("active-turn summary did not retain the byte-identical system/task anchor")
+\t\t\t\t}
+\t\t\t} else if commonPrefixMsgs(m.prevMessages, replayed) != len(replayed) {
+\t\t\t\tm.t.Errorf("history summary request did not replay a byte-identical cached conversation prefix")
+\t\t\t}
+\t\t}
+\t\twriteSSE(w, m.t,
+''',
+        "split history-cache and active-turn summary contracts",
+    )
+    text = replace_once(
+        text,
         '''// A window too small to hold even the system and active tail cannot be repaired
 // by fabricating a mechanical digest.
 func TestTooSmallWindowReturnsCompactionRequired(t *testing.T) {
@@ -54,15 +92,16 @@ func TestTooSmallWindowReturnsCompactionRequired(t *testing.T) {
 ''',
         '''// A small window is recoverable when the immutable head and one live tool
 // group still fit. Rolling active-turn checkpoints summarize older completed
-// groups while keeping the newest protocol anchor verbatim.
+// groups while keeping exactly one current checkpoint and semantic task anchor.
 func TestSmallWindowUsesActiveTurnCheckpoints(t *testing.T) {
 \tmock := &mockDeepSeek{t: t, withTools: true, reasoning: longReasoning, toolRounds: 30}
 \tsrv := httptest.NewServer(http.HandlerFunc(mock.handler))
 \tdefer srv.Close()
 
 \ta, sink := newAgent(t, srv.URL, mock.tools(), 900 /*window tok*/, 4 /*recentKeep*/)
+\trequest := strings.Repeat("please consider this requirement. ", 6)
 
-\tif err := a.Run(context.Background(), strings.Repeat("please consider this requirement. ", 6)); err != nil {
+\tif err := a.Run(context.Background(), request); err != nil {
 \t\tt.Fatalf("Run: %v", err)
 \t}
 \tsummaries := 0
@@ -73,6 +112,22 @@ func TestSmallWindowUsesActiveTurnCheckpoints(t *testing.T) {
 \t}
 \tif summaries == 0 {
 \t\tt.Fatal("small-window tool loop completed without an active-turn summary checkpoint")
+\t}
+
+\tvar originalTask, checkpoints, continuations int
+\tfor _, msg := range visibleContext(a) {
+\t\tswitch {
+\t\tcase msg.Role == provider.RoleUser && msg.Content == request:
+\t\t\toriginalTask++
+\t\tcase strings.HasPrefix(strings.TrimSpace(msg.Content), activeTurnCheckpointTagOpen):
+\t\t\tcheckpoints++
+\t\tcase msg.Content == activeTurnContinuation:
+\t\t\tcontinuations++
+\t\t}
+\t}
+\tif originalTask != 1 || checkpoints != 1 || continuations != 1 {
+\t\tt.Fatalf("visible task/checkpoint/continuation = %d/%d/%d, want 1/1/1",
+\t\t\toriginalTask, checkpoints, continuations)
 \t}
 }
 ''',

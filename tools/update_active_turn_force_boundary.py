@@ -34,6 +34,7 @@ def main() -> None:
     ACTIVE.write_text(text, encoding="utf-8")
 
     text = TESTS.read_text(encoding="utf-8")
+
     start = text.index("func TestPlanCompactionFoldRetainsNewestToolGroup")
     end = text.index("func TestPlanCompactionFoldRejectsSingleIrreducibleToolGroup", start)
     region = text[start:end]
@@ -41,9 +42,43 @@ def main() -> None:
         region,
         "plan, ok := a.planCompactionFold(msgs, true)",
         "plan, ok := a.planCompactionFold(msgs, false)",
-        "retain-newest contract",
+        "retain-newest pressure contract",
     )
-    TESTS.write_text(text[:start] + region + text[end:], encoding="utf-8")
+    text = text[:start] + region + text[end:]
+
+    start = text.index("func TestPlanCompactionFoldRejectsSingleIrreducibleToolGroup")
+    end = text.index("func TestPlanCompactionFoldPrefersCompletedHistory", start)
+    region = text[start:end]
+    region = replace_once(
+        region,
+        "a.planCompactionFold(msgs, true)",
+        "a.planCompactionFold(msgs, false)",
+        "single-group pressure contract",
+    )
+    force_test = r"""func TestPlanCompactionFoldForceCanCheckpointSingleCompleteToolGroup(t *testing.T) {
+\tconst activeCreatedAt = int64(42)
+\tmsgs := []provider.Message{
+\t\t{Role: provider.RoleSystem, Content: "system"},
+\t\t{Role: provider.RoleUser, Content: "continue until fixed", CreatedAt: activeCreatedAt},
+\t\t{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "live", Name: "read", Arguments: `{}`}}},
+\t\t{Role: provider.RoleTool, ToolCallID: "live", Name: "read", Content: strings.Repeat("oversized output ", 3000)},
+\t}
+\ta := &Agent{agentConfig: agentConfig{contextWindow: 1_600}}
+\ta.activeTurnCreatedAt.Store(activeCreatedAt)
+
+\tplan, ok := a.planCompactionFold(msgs, true)
+\tif !ok {
+\t\tt.Fatal("physical overflow should checkpoint a complete atomic tool group")
+\t}
+\tif plan.kind != compactionFoldActiveTurn || plan.prefixEnd != 2 ||
+\t\tplan.summaryStart != 1 || plan.foldEnd != len(msgs) {
+\t\tt.Fatalf("forced plan = %+v, want active [prefix=2 summary=1 fold=%d]", plan, len(msgs))
+\t}
+}
+
+"""
+    text = text[:start] + region + force_test + text[end:]
+    TESTS.write_text(text, encoding="utf-8")
 
 
 if __name__ == "__main__":
