@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import pathlib
 
-TARGET = pathlib.Path("internal/agent/cachehit_e2e_test.go")
+CACHEHIT = pathlib.Path("internal/agent/cachehit_e2e_test.go")
+RECOVERY = pathlib.Path("internal/agent/context_recovery_tool_loop_test.go")
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -13,8 +14,8 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-def main() -> None:
-    text = TARGET.read_text(encoding="utf-8")
+def update_cachehit() -> None:
+    text = CACHEHIT.read_text(encoding="utf-8")
     text = replace_once(text, '\t"errors"\n', "", "remove obsolete errors import")
     text = replace_once(
         text,
@@ -59,7 +60,54 @@ func TestSmallWindowUsesActiveTurnCheckpoints(t *testing.T) {
 ''',
         "update small-window checkpoint contract",
     )
-    TARGET.write_text(text, encoding="utf-8")
+    CACHEHIT.write_text(text, encoding="utf-8")
+
+
+def update_recovery() -> None:
+    text = RECOVERY.read_text(encoding="utf-8")
+    text = replace_once(
+        text,
+        '''\terr := a.Run(context.Background(), "keep using the tool until the provider says the task is done")
+\tif err == nil {
+\t\tt.Fatal("overflow without new projection progress unexpectedly retried")
+\t}
+
+\tprov.mu.Lock()
+\tdefer prov.mu.Unlock()
+\tif prov.overflows != 2 {
+\t\tt.Fatalf("provider overflows = %d, want 2", prov.overflows)
+\t}
+\tif prov.requestsAt[3] != 2 || prov.requestsAt[6] != 1 {
+\t\tt.Fatalf("requests at overflow points = %v, want one retry after progress and none without progress", prov.requestsAt)
+\t}
+\tif prov.summaries > 1 || applied > 1 {
+\t\tt.Fatalf("summaries=%d applied=%d, want no repeated summary without new projection input", prov.summaries, applied)
+\t}
+''',
+        '''\tif err := a.Run(context.Background(), "keep using the tool until the provider says the task is done"); err != nil {
+\t\tt.Fatalf("Run: %v", err)
+\t}
+
+\tprov.mu.Lock()
+\tdefer prov.mu.Unlock()
+\tif prov.overflows != 2 {
+\t\tt.Fatalf("provider overflows = %d, want 2", prov.overflows)
+\t}
+\tif prov.requestsAt[3] != 2 || prov.requestsAt[6] != 2 {
+\t\tt.Fatalf("requests at overflow points = %v, want one retry after each checkpoint makes progress", prov.requestsAt)
+\t}
+\tif prov.summaries < 2 || applied < 2 {
+\t\tt.Fatalf("summaries=%d applied=%d, want rolling checkpoints to recover both overflows", prov.summaries, applied)
+\t}
+''',
+        "update repeated-overflow recovery contract",
+    )
+    RECOVERY.write_text(text, encoding="utf-8")
+
+
+def main() -> None:
+    update_cachehit()
+    update_recovery()
 
 
 if __name__ == "__main__":
