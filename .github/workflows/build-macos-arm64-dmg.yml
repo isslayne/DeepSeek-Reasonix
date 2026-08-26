@@ -1,0 +1,203 @@
+name: Build macOS ARM64 DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label (for example v1.20.0-test); leave empty for a per-run development version"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-macos-arm64-dmg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build macOS ARM64 DMG
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      DMG_NAME: Reasonix-darwin-arm64.dmg
+
+    steps:
+      - name: Check out selected revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify source and runner architecture
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [ "$actual_sha" != "$GITHUB_SHA" ]; then
+            echo "Checked out $actual_sha, expected $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          runner_arch="$(uname -m)"
+          if [ "$runner_arch" != "arm64" ]; then
+            echo "macos-14 runner architecture is $runner_arch, expected arm64" >&2
+            exit 1
+          fi
+
+          echo "sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          echo "arch=$runner_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            desktop/go.sum
+
+      - name: Test agent package
+        run: go test ./internal/agent -count=1 -timeout=10m
+
+      - name: Vet agent package
+        run: go vet ./internal/agent
+
+      - name: Resolve package version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$REQUESTED_VERSION"
+          if [ -z "$version" ]; then
+            version="v0.0.0-dev.${GITHUB_RUN_NUMBER}"
+          elif [[ "$version" != v* ]]; then
+            version="v${version}"
+          fi
+
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "Invalid version: $version" >&2
+            echo "Use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease" >&2
+            exit 1
+          fi
+
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6.0.9
+        with:
+          version: 10
+
+      - name: Install create-dmg
+        shell: bash
+        run: brew list create-dmg >/dev/null 2>&1 || brew install create-dmg
+
+      - name: Install Wails CLI
+        shell: bash
+        run: go install "github.com/wailsapp/wails/v2/cmd/wails@$(tr -d '[:space:]' < .wails-version)"
+
+      - name: Build and package ARM64 app
+        shell: bash
+        env:
+          HAS_APPLE_CERT: "false"
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: scripts/desktop-build.sh darwin/arm64 "$PACKAGE_VERSION" stable
+
+      - name: Name ARM64 disk image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dmg="dist/Reasonix-darwin-universal.dmg"
+          target_dmg="dist/$DMG_NAME"
+          test -f "$source_dmg"
+          test -f dist/Reasonix-darwin-arm64.zip
+          mv "$source_dmg" "$target_dmg"
+
+      - name: Verify disk image and packaged architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="dist/$DMG_NAME"
+          hdiutil verify "$dmg"
+
+          mount_dir="$(mktemp -d)"
+          attached=false
+          cleanup() {
+            if [ "$attached" = true ]; then
+              hdiutil detach "$mount_dir" >/dev/null || true
+            fi
+            rmdir "$mount_dir" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg" >/dev/null
+          attached=true
+
+          app="$mount_dir/Reasonix.app"
+          test -d "$app"
+          for binary in \
+            "$app/Contents/MacOS/reasonix-desktop" \
+            "$app/Contents/MacOS/reasonix"; do
+            test -x "$binary"
+            binary_archs="$(lipo -archs "$binary")"
+            if [ "$binary_archs" != "arm64" ]; then
+              echo "$binary contains '$binary_archs', expected only arm64" >&2
+              exit 1
+            fi
+          done
+
+          codesign --verify --deep --strict --verbose=2 "$app"
+          hdiutil detach "$mount_dir" >/dev/null
+          attached=false
+          rmdir "$mount_dir"
+          trap - EXIT
+
+      - name: Generate SHA-256 checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
+
+      - name: Upload ARM64 DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: Reasonix-macos-arm64-${{ github.run_number }}
+          path: |
+            dist/Reasonix-darwin-arm64.dmg
+            dist/Reasonix-darwin-arm64.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Write build summary
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          RUNNER_ARCH: ${{ steps.source.outputs.arch }}
+        run: |
+          {
+            echo "## Reasonix macOS ARM64 DMG"
+            echo
+            printf '| Item | Value |\n'
+            printf '| --- | --- |\n'
+            printf '| Source ref | `%s` |\n' "$GITHUB_REF_NAME"
+            printf '| Commit | `%s` |\n' "$SOURCE_SHA"
+            printf '| Version | `%s` |\n' "$PACKAGE_VERSION"
+            printf '| Architecture | `%s` |\n' "$RUNNER_ARCH"
+            printf '| Signing | `%s` |\n' "ad-hoc (not notarized)"
+            printf '| Artifact | `%s` |\n' "Reasonix-macos-arm64-${GITHUB_RUN_NUMBER}"
+            echo
+            echo 'If Gatekeeper blocks the installed app, run `xattr -dr com.apple.quarantine /Applications/Reasonix.app`.'
+          } >> "$GITHUB_STEP_SUMMARY"
