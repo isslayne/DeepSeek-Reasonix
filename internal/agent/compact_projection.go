@@ -766,11 +766,7 @@ func (a *Agent) partitionFoldForProjection(region []provider.Message) (kept, fol
 	return kept, fold, retention
 }
 
-// runCompactionSummary uses the single local summarizer path for every provider.
-func (a *Agent) runCompactionSummary(ctx context.Context, fold []provider.Message, instructions string) (summary, mode string, usage *provider.Usage, providerReqID string, err error) {
-	return a.runCompactionSummaryForPurpose(ctx, fold, instructions, summaryPurposeHistory)
-}
-
+// runCompactionSummaryForPurpose uses the single local summarizer path for every provider.
 func (a *Agent) runCompactionSummaryForPurpose(ctx context.Context, fold []provider.Message, instructions string, purpose summaryPurpose) (summary, mode string, usage *provider.Usage, providerReqID string, err error) {
 	summary, usage, err = a.summarizeOnceForPurpose(ctx, fold, instructions, purpose)
 	if err != nil {

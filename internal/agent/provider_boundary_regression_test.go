@@ -39,7 +39,7 @@ func TestPressurePruneNeverPromotesRawToolContent(t *testing.T) {
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "call-1", Name: "read_file", Arguments: `{}`}}},
 		{Role: provider.RoleTool, ToolCallID: "call-1", Name: "read_file", Content: bounded, RawContent: raw},
 	}
-	for i := 0; i < pressureKeepRecentToolGroups; i++ {
+	for i := range pressureKeepRecentToolGroups {
 		id := fmt.Sprintf("recent-%d", i)
 		msgs = append(msgs,
 			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: id, Name: "read_file", Arguments: `{}`}}},

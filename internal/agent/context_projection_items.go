@@ -218,8 +218,8 @@ type checkpointModelPayload struct {
 
 func parseCheckpointModelPayload(summary string) (checkpointModelPayload, bool) {
 	trimmed := strings.TrimSpace(summary)
-	if strings.HasPrefix(trimmed, "```json") {
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "```json"))
+	if after, ok := strings.CutPrefix(trimmed, "```json"); ok {
+		trimmed = strings.TrimSpace(after)
 		trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, "```"))
 	}
 	var payload checkpointModelPayload

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"slices"
 	"strings"
 
 	"reasonix/internal/provider"
@@ -104,10 +105,6 @@ func (a *Agent) planCompactionFold(msgs []provider.Message, force bool) (compact
 }
 
 // completedActiveTurnFoldEnd retains the newest provider-visible resume unit.
-func completedActiveTurnFoldEnd(msgs []provider.Message, start, limit int) int {
-	return completedActiveTurnFoldEndWithOptions(msgs, start, limit, contextUnitBuildOptions{})
-}
-
 func (a *Agent) completedActiveTurnFoldEnd(msgs []provider.Message, start, limit int) int {
 	return completedActiveTurnFoldEndWithOptions(msgs, start, limit, a.contextUnitBuildOptions())
 }
@@ -215,20 +212,11 @@ func hasProviderVisibleMessage(msgs []provider.Message) bool {
 }
 
 func hasActiveTurnCheckpoint(msgs []provider.Message) bool {
-	for _, msg := range msgs {
-		if isActiveTurnCheckpointMessage(msg) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(msgs, isActiveTurnCheckpointMessage)
 }
 
 func isActiveTurnCheckpointMessage(msg provider.Message) bool {
 	return msg.ProjectionKind == projectionKindActiveCheckpoint
-}
-
-func toolCallGroupComplete(calls []provider.ToolCall, results []provider.Message) bool {
-	return buildToolGroupReceipt(-1, calls, results, false).Complete
 }
 
 func activeTurnCheckpointInstructions(instructions string) string {
@@ -237,10 +225,6 @@ func activeTurnCheckpointInstructions(instructions string) string {
 		return activeTurnCheckpointInstruction
 	}
 	return instructions + "\n\n" + activeTurnCheckpointInstruction
-}
-
-func formatActiveTurnCheckpoint(summary string) provider.Message {
-	return formatTypedActiveTurnCheckpoint(ActiveTurnCheckpoint{SchemaVersion: 1, Narrative: strings.TrimSpace(summary)})
 }
 
 func activeTurnCheckpointProjectionMessages(msgs []provider.Message, prefixEnd, foldEnd int, summary string) []provider.Message {

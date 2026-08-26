@@ -314,7 +314,7 @@ func TestPrunePreservesToolEnvelopeMetadata(t *testing.T) {
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "call-7", Name: "bash", Arguments: `{}`}}},
 		original,
 	}
-	for i := 0; i < pressureKeepRecentToolGroups; i++ {
+	for i := range pressureKeepRecentToolGroups {
 		id := fmt.Sprintf("recent-%d", i)
 		msgs = append(msgs,
 			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: id, Name: "read_file", Arguments: `{}`}}},
@@ -348,7 +348,7 @@ func TestPrunePreservesToolEnvelopeMetadata(t *testing.T) {
 func TestDeterministicToolClearIsAddressableAndKeepsRecentGroups(t *testing.T) {
 	full := strings.Repeat("archived output\n", 1400)
 	msgs := []provider.Message{{Role: provider.RoleSystem, Content: "sys"}, {Role: provider.RoleUser, Content: "task"}}
-	for i := 0; i < pressureKeepRecentToolGroups+1; i++ {
+	for i := range pressureKeepRecentToolGroups + 1 {
 		id := fmt.Sprintf("call-%d", i)
 		body := "recent"
 		if i == 0 {

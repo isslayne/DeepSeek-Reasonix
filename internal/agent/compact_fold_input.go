@@ -56,20 +56,12 @@ func (a *Agent) foldToSummaryModeForPurpose(ctx context.Context, fold []provider
 	return a.singleCallSummaryForPurpose(ctx, res, fold, instructions, purpose)
 }
 
-func (a *Agent) singleCallSummary(ctx context.Context, res foldSummary, fold []provider.Message, instructions string) (foldSummary, error) {
-	return a.singleCallSummaryForPurpose(ctx, res, fold, instructions, summaryPurposeHistory)
-}
-
 func (a *Agent) singleCallSummaryForPurpose(ctx context.Context, res foldSummary, fold []provider.Message, instructions string, purpose summaryPurpose) (foldSummary, error) {
 	started := time.Now()
 	summary, mode, usage, reqID, err := a.runCompactionSummaryForPurpose(ctx, fold, instructions, purpose)
 	res.Text, res.Mode, res.Usage, res.RequestID = summary, mode, usage, reqID
 	res.LatencyMS = time.Since(started).Milliseconds()
 	return res, err
-}
-
-func (a *Agent) foldSummaryWithTelemetry(ctx context.Context, trigger string, fold []provider.Message, instructions string, sourceTokens int, inputMode string) (foldSummary, CompactionTelemetry, error) {
-	return a.foldSummaryWithTelemetryForPurpose(ctx, trigger, fold, instructions, sourceTokens, inputMode, summaryPurposeHistory)
 }
 
 func (a *Agent) foldSummaryWithTelemetryForPurpose(ctx context.Context, trigger string, fold []provider.Message, instructions string, sourceTokens int, inputMode string, purpose summaryPurpose) (foldSummary, CompactionTelemetry, error) {

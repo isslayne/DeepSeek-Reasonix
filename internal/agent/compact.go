@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -323,8 +324,7 @@ func tailStartWithOptions(msgs []provider.Message, head, budgetTokens int, tokPe
 	units := buildContextUnits(msgs, options)
 	start := len(msgs)
 	acc := 0
-	for i := len(units) - 1; i >= 0; i-- {
-		unit := units[i]
+	for _, unit := range slices.Backward(units) {
 		if unit.VisibleStart <= head {
 			break
 		}
@@ -451,17 +451,6 @@ func (a *Agent) summaryRequestForPurpose(region []provider.Message, instructions
 		MaxTokens:   maxTokens,
 		Temperature: provider.OptionalTemperature(a.temperature),
 	}
-}
-
-func isActiveTurnCheckpointSummary(instructions string) bool {
-	return strings.Contains(instructions, activeTurnCheckpointInstruction)
-}
-
-// applyActiveTurnSummaryAdmission gives the emergency maintenance request its
-// bounded output envelope through the same budget calculator used by history
-// summaries and ordinary sampling.
-func (a *Agent) applyActiveTurnSummaryAdmission(req *provider.Request) error {
-	return a.applySummaryAdmission(req, summaryPurposeActiveCheckpoint)
 }
 
 func (a *Agent) summaryOutputEnvelope(purpose summaryPurpose) (desired, minimum int) {
