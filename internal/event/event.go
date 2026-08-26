@@ -423,22 +423,6 @@ type Compaction struct {
 	Archive  string // Done: path the dropped originals were archived to ("" if none)
 }
 
-// ContextMaintenance is the typed wire-safe receipt for snip/prune/noop/
-// blocked operations. Transcript bytes are represented by hashes and counts.
-type ContextMaintenance struct {
-	Status              string `json:"status,omitempty"`
-	Action              string `json:"action,omitempty"`
-	Trigger             string `json:"trigger,omitempty"`
-	OperationID         string `json:"operationId,omitempty"`
-	InputTokens         int    `json:"inputTokens,omitempty"`
-	ResultTokens        int    `json:"resultTokens,omitempty"`
-	SavedTokens         int    `json:"savedTokens,omitempty"`
-	AffectedToolResults int    `json:"affectedToolResults,omitempty"`
-	ProjectionVersion   uint64 `json:"projectionVersion,omitempty"`
-	CacheBreak          bool   `json:"cacheBreak,omitempty"`
-	Reason              string `json:"reason,omitempty"`
-}
-
 // GuardianResult carries the outcome of a guardian sub-agent safety review.
 // Emitted with Kind=GuardianAssessment after each review completes.
 type GuardianResult struct {
@@ -465,15 +449,17 @@ type AskAnswer struct {
 // the last turn. It rides on the Usage event so every frontend can show
 // cache-churn attribution.
 type CacheDiagnostics struct {
-	PrefixHash          string
-	PrefixChanged       bool
-	PrefixChangeReasons []string // "system", "tools", "log_rewrite"
-	SystemHash          string
-	ToolsHash           string
-	LogRewriteVersion   int
-	ToolSchemaTokens    int
-	CacheMissTokens     int
-	CacheHitTokens      int
+	PrefixHash           string
+	PrefixChanged        bool
+	PrefixChangeReasons  []string // "system", "tools", "log_rewrite"
+	SystemHash           string
+	ToolsHash            string
+	LogRewriteVersion    int
+	ToolSchemaTokens     int
+	CacheMissTokens      int
+	CacheHitTokens       int
+	ProjectionGeneration uint64
+	CacheGeneration      uint64
 }
 
 // FinalReadiness carries machine-readable recovery requirements on TurnDone.

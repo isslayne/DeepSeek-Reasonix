@@ -25,8 +25,8 @@ func TestAdmitOutputBudgetClipsIssue8909AndScreenshot(t *testing.T) {
 		requested int
 		want      int
 	}{
-		{name: "issue8909", prompt: 810_882, requested: 354_469, want: 229_502},
-		{name: "screenshot", prompt: 917_189, requested: 245_760, want: 123_195},
+		{name: "issue8909", prompt: 810_882, requested: 354_469, want: 236_670},
+		{name: "screenshot", prompt: 917_189, requested: 245_760, want: 130_363},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,8 +63,8 @@ func TestAdmitOutputBudgetUsesOfficialAutoWhenConfigIsZero(t *testing.T) {
 	if err := a.applyAdmissionToRequest(&req); err != nil {
 		t.Fatal(err)
 	}
-	if req.MaxTokens != 229_502 {
-		t.Fatalf("auto official clip = %d, want 229502", req.MaxTokens)
+	if req.MaxTokens != 236_670 {
+		t.Fatalf("auto official clip = %d, want 236670", req.MaxTokens)
 	}
 }
 

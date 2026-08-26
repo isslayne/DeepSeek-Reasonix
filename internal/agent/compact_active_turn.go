@@ -12,7 +12,8 @@ const (
 )
 
 const activeTurnCheckpointInstruction = `This compaction is a rolling checkpoint inside one user turn that is still running.
-The original user request remains verbatim outside the checkpoint. Preserve exact completed work, tool outcomes, files, identifiers, decisions, unresolved errors, and the next concrete action. Do not imply that the task or turn is complete. Do not omit a later user correction if one appears in the fold.`
+The original user request remains verbatim outside the checkpoint. Preserve exact completed work, files, identifiers, decisions, unresolved errors, and the next concrete action. Do not imply that the task or turn is complete. Do not omit a later user correction if one appears in the fold.
+Return exactly one JSON object with these keys: standing_constraints (array of strings), decisions (array of strings), errors (array of strings), pending (array of strings), next_action (string), narrative (string). Do not include call IDs, hashes, archive references, coverage, or generation: the host attaches those verified fields. Output JSON only. Do not call tools.`
 
 const activeTurnContinuation = `<compaction-summary>
 The original user request is still active. Continue from the active-turn checkpoint above without repeating completed work. Treat the retained recent messages below as the live tail of the same turn.
@@ -79,7 +80,11 @@ func (a *Agent) planCompactionFold(msgs []provider.Message, force bool) (compact
 	}
 
 	foldStart := active + 1
-	foldEnd := completedActiveTurnFoldEnd(msgs, foldStart, plannedEnd)
+	foldEnd := a.completedActiveTurnFoldEnd(msgs, foldStart, plannedEnd)
+	if force {
+		// Physical overflow may checkpoint the newest complete atomic group.
+		foldEnd = a.completedActiveTurnPrefixEnd(msgs, foldStart, plannedEnd)
+	}
 	if foldEnd <= foldStart {
 		return compactionFoldPlan{}, false
 	}
@@ -90,27 +95,25 @@ func (a *Agent) planCompactionFold(msgs []provider.Message, force bool) (compact
 	plan := compactionFoldPlan{
 		kind:      compactionFoldActiveTurn,
 		prefixEnd: foldStart,
-		// Summary admission must be bounded independently from the ordinary
-		// cache-aligned request prefix. Replaying msgs[:active] here can make a
-		// recovery summary impossible once the provider teaches us a smaller
-		// shared window: the immutable historical prefix alone may consume the
-		// summary budget. The active user request is the durable semantic anchor,
-		// so summarize from it plus completed work; summaryRequest will add the
-		// system message and tool schemas exactly once. This trades cache reuse at
-		// the exceptional recovery boundary for guaranteed bounded progress.
+		// Bound the summary to the active task plus completed work; the request
+		// builder adds the system anchor exactly once.
 		summaryStart: active,
 		foldEnd:      foldEnd,
 	}
 	return plan, plan.valid(msgs)
 }
 
-// completedActiveTurnFoldEnd returns a safe completed prefix while retaining
-// at least one provider-visible resume anchor after the checkpoint. In
-// particular, the newest complete tool-call/result group stays verbatim. This
-// preserves the sampling protocol and prevents a synthetic continuation from
-// causing the model to repeat a tool call whose result was just summarized.
+// completedActiveTurnFoldEnd retains the newest provider-visible resume unit.
 func completedActiveTurnFoldEnd(msgs []provider.Message, start, limit int) int {
-	safe, lastUnitStart := completedActiveTurnBoundary(msgs, start, limit)
+	return completedActiveTurnFoldEndWithOptions(msgs, start, limit, contextUnitBuildOptions{})
+}
+
+func (a *Agent) completedActiveTurnFoldEnd(msgs []provider.Message, start, limit int) int {
+	return completedActiveTurnFoldEndWithOptions(msgs, start, limit, a.contextUnitBuildOptions())
+}
+
+func completedActiveTurnFoldEndWithOptions(msgs []provider.Message, start, limit int, options contextUnitBuildOptions) int {
+	safe, lastUnitStart := completedActiveTurnBoundary(msgs, start, limit, options)
 	if safe <= start {
 		return start
 	}
@@ -127,11 +130,44 @@ func completedActiveTurnFoldEnd(msgs []provider.Message, start, limit int) int {
 // message boundary. It never crosses a later user-authored turn and never
 // splits an assistant tool_calls record from its complete result group.
 func completedActiveTurnPrefixEnd(msgs []provider.Message, start, limit int) int {
-	safe, _ := completedActiveTurnBoundary(msgs, start, limit)
+	safe, _ := completedActiveTurnBoundary(msgs, start, limit, contextUnitBuildOptions{})
 	return safe
 }
 
-func completedActiveTurnBoundary(msgs []provider.Message, start, limit int) (safe, lastUnitStart int) {
+func (a *Agent) completedActiveTurnPrefixEnd(msgs []provider.Message, start, limit int) int {
+	safe, _ := completedActiveTurnBoundary(msgs, start, limit, a.contextUnitBuildOptions())
+	return safe
+}
+
+// nextActiveTurnProgressEnd returns the first complete provider-visible unit
+// after start. It skips local/synthetic bookkeeping, but never crosses a real
+// user steer or an incomplete tool group.
+func nextActiveTurnProgressEnd(units []ContextUnit, start int) int {
+	safe := start
+	for _, unit := range units {
+		if unit.VisibleEnd <= start {
+			continue
+		}
+		if unit.VisibleStart != safe || (unit.Kind == UnitUserTurn && unit.UserAuthored) ||
+			(unit.Kind == UnitToolGroup && !unit.Complete) {
+			return start
+		}
+		safe = unit.VisibleEnd
+		if unit.ProviderVisible && unit.Kind != UnitSyntheticControl {
+			return safe
+		}
+	}
+	return start
+}
+
+func (a *Agent) contextUnitBuildOptions() contextUnitBuildOptions {
+	if a == nil {
+		return contextUnitBuildOptions{}
+	}
+	return contextUnitBuildOptions{allowPositionalToolPairing: provider.SupportsPositionalToolPairing(a.svc.prov)}
+}
+
+func completedActiveTurnBoundary(msgs []provider.Message, start, limit int, options contextUnitBuildOptions) (safe, lastUnitStart int) {
 	if start < 0 {
 		start = 0
 	}
@@ -142,38 +178,29 @@ func completedActiveTurnBoundary(msgs []provider.Message, start, limit int) (saf
 		return start, -1
 	}
 
+	units := buildContextUnits(msgs, options)
+	if !contextUnitBoundary(units, start) {
+		return start, -1
+	}
 	safe = start
 	lastUnitStart = -1
-	for i := start; i < limit; {
-		m := msgs[i]
-		if m.LocalOnly {
-			i++
-			safe = i
+	for _, unit := range units {
+		if unit.VisibleEnd <= start {
 			continue
 		}
-		if m.Role == provider.RoleUser && !isCompactionSummary(m) {
+		if unit.VisibleStart != safe || unit.VisibleEnd > limit {
 			break
 		}
-		if m.Role == provider.RoleTool {
+		if unit.Kind == UnitUserTurn && unit.UserAuthored {
 			break
 		}
-		unitStart := i
-		if m.Role == provider.RoleAssistant && len(m.ToolCalls) > 0 {
-			j := i + 1
-			for j < limit && msgs[j].Role == provider.RoleTool && !msgs[j].LocalOnly {
-				j++
-			}
-			if !toolCallGroupComplete(m.ToolCalls, msgs[i+1:j]) {
-				break
-			}
-			safe = j
-			lastUnitStart = unitStart
-			i = j
-			continue
+		if unit.Kind == UnitToolGroup && !unit.Complete {
+			break
 		}
-		safe = i + 1
-		lastUnitStart = unitStart
-		i++
+		safe = unit.VisibleEnd
+		if unit.ProviderVisible {
+			lastUnitStart = unit.VisibleStart
+		}
 	}
 	return safe, lastUnitStart
 }
@@ -189,50 +216,19 @@ func hasProviderVisibleMessage(msgs []provider.Message) bool {
 
 func hasActiveTurnCheckpoint(msgs []provider.Message) bool {
 	for _, msg := range msgs {
-		if strings.HasPrefix(strings.TrimSpace(msg.Content), activeTurnCheckpointTagOpen) {
+		if isActiveTurnCheckpointMessage(msg) {
 			return true
 		}
 	}
 	return false
 }
 
+func isActiveTurnCheckpointMessage(msg provider.Message) bool {
+	return msg.ProjectionKind == projectionKindActiveCheckpoint
+}
+
 func toolCallGroupComplete(calls []provider.ToolCall, results []provider.Message) bool {
-	if len(calls) == 0 {
-		return true
-	}
-	if len(results) < len(calls) {
-		return false
-	}
-
-	distinct := true
-	seenCalls := make(map[string]struct{}, len(calls))
-	for _, call := range calls {
-		if call.ID == "" {
-			distinct = false
-			break
-		}
-		if _, exists := seenCalls[call.ID]; exists {
-			distinct = false
-			break
-		}
-		seenCalls[call.ID] = struct{}{}
-	}
-	if !distinct {
-		return len(results) >= len(calls)
-	}
-
-	answered := make(map[string]struct{}, len(results))
-	for _, result := range results {
-		if result.Role == provider.RoleTool {
-			answered[result.ToolCallID] = struct{}{}
-		}
-	}
-	for _, call := range calls {
-		if _, ok := answered[call.ID]; !ok {
-			return false
-		}
-	}
-	return true
+	return buildToolGroupReceipt(-1, calls, results, false).Complete
 }
 
 func activeTurnCheckpointInstructions(instructions string) string {
@@ -244,22 +240,26 @@ func activeTurnCheckpointInstructions(instructions string) string {
 }
 
 func formatActiveTurnCheckpoint(summary string) provider.Message {
-	return provider.Message{
-		Role: provider.RoleAssistant,
-		Content: activeTurnCheckpointTagOpen + "\n" + strings.TrimSpace(summary) +
-			"\n" + activeTurnCheckpointTagClose,
-	}
+	return formatTypedActiveTurnCheckpoint(ActiveTurnCheckpoint{SchemaVersion: 1, Narrative: strings.TrimSpace(summary)})
 }
 
 func activeTurnCheckpointProjectionMessages(msgs []provider.Message, prefixEnd, foldEnd int, summary string) []provider.Message {
+	checkpoint := ActiveTurnCheckpoint{SchemaVersion: 1, Narrative: strings.TrimSpace(summary)}
+	return activeTurnCheckpointProjectionMessagesTyped(msgs, prefixEnd, foldEnd, checkpoint)
+}
+
+func activeTurnCheckpointProjectionMessagesTyped(msgs []provider.Message, prefixEnd, foldEnd int, checkpoint ActiveTurnCheckpoint) []provider.Message {
 	proj := make([]provider.Message, 0, prefixEnd+2)
 	proj = append(proj, msgs[:prefixEnd]...)
-	proj = append(proj, formatActiveTurnCheckpoint(summary))
+	proj = append(proj, formatTypedActiveTurnCheckpoint(checkpoint))
 	// When the retained tail already starts with a user message it supplies the
 	// continuation boundary. Otherwise add a synthetic user marker so the next
 	// sampling request ends in a legal user→assistant/tool continuation shape.
 	if foldEnd >= len(msgs) || msgs[foldEnd].Role != provider.RoleUser {
-		proj = append(proj, provider.Message{Role: provider.RoleUser, Content: activeTurnContinuation})
+		proj = append(proj, provider.Message{
+			Role: provider.RoleUser, Content: activeTurnContinuation,
+			ProjectionKind: projectionKindSyntheticControl, Synthetic: true,
+		})
 	}
 	return provider.ProjectionMessages(proj)
 }

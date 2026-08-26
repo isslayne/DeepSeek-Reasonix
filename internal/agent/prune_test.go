@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,26 +80,36 @@ func TestPruneSurvivesSummaryFailureAndRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	bigTool := strings.Repeat("🧪", 12_000)
 	bigWork := strings.Repeat("assistant work ", 12_000)
-	sess := &Session{Messages: []provider.Message{
+	msgs := []provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
 		{Role: provider.RoleUser, Content: "task"},
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "call-1", Name: "read_file", Arguments: "{}"}}},
 		{Role: provider.RoleTool, ToolCallID: "call-1", Name: "read_file", Content: bigTool},
-		{Role: provider.RoleAssistant, Content: bigWork},
-		{Role: provider.RoleUser, Content: "tail"},
-	}}
+	}
+	for i := 2; i <= 4; i++ {
+		id := fmt.Sprintf("call-%d", i)
+		msgs = append(msgs,
+			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: id, Name: "read_file", Arguments: "{}"}}},
+			provider.Message{Role: provider.RoleTool, ToolCallID: id, Name: "read_file", Content: strings.Repeat("recent ", 100)},
+		)
+	}
+	msgs = append(msgs,
+		provider.Message{Role: provider.RoleAssistant, Content: bigWork},
+		provider.Message{Role: provider.RoleUser, Content: "tail"},
+	)
+	sess := &Session{Messages: msgs}
 	a := New(&fakeProvider{streamErr: errors.New("summary down")}, tool.NewRegistry(), sess, Options{
 		ContextWindow: 60_000, CompactRatio: 0.50, SessionPath: path,
 	}, event.Discard)
 	if _, err := a.contextManager().Prepare(context.Background(), ContextPreparePolicy{Trigger: CompactionTriggerPressure}); err != nil {
 		t.Fatalf("pressure below hard ceiling should continue from prune: %v", err)
 	}
-	if a.currentProjectionVersion() != 1 || countToolResultsContaining(a.modelVisibleMessages(), toolPruneMarker) != 1 {
+	if a.currentProjectionVersion() != 1 || countToolResultsContaining(a.modelVisibleMessages(), toolClearMarker) != 1 {
 		t.Fatalf("prune did not survive summary failure: version=%d view=%+v", a.currentProjectionVersion(), a.modelVisibleMessages())
 	}
 
 	restarted := New(nil, tool.NewRegistry(), sess, Options{ContextWindow: 60_000, CompactRatio: 0.50, SessionPath: path}, event.Discard)
-	if restarted.currentProjectionVersion() != 1 || countToolResultsContaining(restarted.modelVisibleMessages(), toolPruneMarker) != 1 {
+	if restarted.currentProjectionVersion() != 1 || countToolResultsContaining(restarted.modelVisibleMessages(), toolClearMarker) != 1 {
 		t.Fatalf("restart lost prune projection: version=%d view=%+v", restarted.currentProjectionVersion(), restarted.modelVisibleMessages())
 	}
 }
@@ -105,12 +117,22 @@ func TestPruneSurvivesSummaryFailureAndRestart(t *testing.T) {
 func TestPruneSidecarWriteFailureRollsBackWithoutAppliedReceipt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	bigTool := strings.Repeat("界", toolPruneThresholdRunes+1)
-	sess := &Session{Messages: []provider.Message{
+	msgs := []provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
 		{Role: provider.RoleUser, Content: "read"},
-		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "call-1", Name: "read_file", Arguments: "{}"}}},
-		{Role: provider.RoleTool, ToolCallID: "call-1", Name: "read_file", Content: bigTool},
-	}}
+	}
+	for i := 1; i <= 4; i++ {
+		id := fmt.Sprintf("call-%d", i)
+		body := "small"
+		if i == 1 {
+			body = bigTool
+		}
+		msgs = append(msgs,
+			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: id, Name: "read_file", Arguments: "{}"}}},
+			provider.Message{Role: provider.RoleTool, ToolCallID: id, Name: "read_file", Content: body},
+		)
+	}
+	sess := &Session{Messages: msgs}
 	appliedEvents := 0
 	sink := event.FuncSink(func(e event.Event) {
 		if e.Kind == event.ContextMaintenanceEvent && e.Maintenance != nil && e.Maintenance.Status == "applied" {
@@ -180,8 +202,8 @@ func TestMaintenancePrunesBeforeSummaryAndStopsWhenPressureClears(t *testing.T) 
 		t.Fatalf("summarizer calls = %d, want 0", len(prov.got))
 	}
 	visible := a.modelVisibleMessages()
-	if got := countToolResultsContaining(visible, toolPruneMarker); got != 8 {
-		t.Fatalf("pruned tool results = %d, want 8", got)
+	if got := countToolResultsContaining(visible, toolClearMarker); got != 5 {
+		t.Fatalf("cleared tool results = %d, want 5 with three recent groups retained", got)
 	}
 	if got := a.sess.compactionState.LastReceipt.Action; got != "prune" {
 		t.Fatalf("receipt action = %q, want prune", got)
@@ -287,11 +309,19 @@ func TestPrunePreservesToolEnvelopeMetadata(t *testing.T) {
 		Images:  []string{"data:image/png;base64,AA=="}, CreatedAt: 77,
 		ToolExecution: &provider.ToolExecution{State: tool.ShellStateFailed, ExitCode: &exit},
 	}
-	sess := &Session{Messages: []provider.Message{
+	msgs := []provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "call-7", Name: "bash", Arguments: `{}`}}},
 		original,
-	}}
+	}
+	for i := 0; i < pressureKeepRecentToolGroups; i++ {
+		id := fmt.Sprintf("recent-%d", i)
+		msgs = append(msgs,
+			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: id, Name: "read_file", Arguments: `{}`}}},
+			provider.Message{Role: provider.RoleTool, Name: "read_file", ToolCallID: id, Content: "small"},
+		)
+	}
+	sess := &Session{Messages: msgs}
 	a := New(nil, tool.NewRegistry(), sess, Options{}, event.Discard)
 	a.sess.compactionRunMu.Lock()
 	advanced, err := a.pruneToolResultsToProjectionLocked(CompactionTriggerPressure)
@@ -308,5 +338,50 @@ func TestPrunePreservesToolEnvelopeMetadata(t *testing.T) {
 	}
 	if !strings.Contains(got.Content, toolPruneMarker) {
 		t.Fatalf("tool body was not pruned: runes=%d", len([]rune(got.Content)))
+	}
+	if len(a.sess.compactionState.Projection.ToolReceipts) != 1 ||
+		a.sess.compactionState.Projection.ToolReceipts[0].CallID != "call-7" {
+		t.Fatalf("tool receipts = %+v", a.sess.compactionState.Projection.ToolReceipts)
+	}
+}
+
+func TestDeterministicToolClearIsAddressableAndKeepsRecentGroups(t *testing.T) {
+	full := strings.Repeat("archived output\n", 1400)
+	msgs := []provider.Message{{Role: provider.RoleSystem, Content: "sys"}, {Role: provider.RoleUser, Content: "task"}}
+	for i := 0; i < pressureKeepRecentToolGroups+1; i++ {
+		id := fmt.Sprintf("call-%d", i)
+		body := "recent"
+		if i == 0 {
+			body = full
+		}
+		msgs = append(msgs,
+			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: id, Name: "read_file", Arguments: `{}`}}},
+			provider.Message{Role: provider.RoleTool, ToolCallID: id, Name: "read_file", Content: body},
+		)
+	}
+	sess := &Session{Messages: msgs}
+	a := New(nil, tool.NewRegistry(), sess, Options{ContextWindow: 100_000}, event.Discard)
+	a.sess.compactionRunMu.Lock()
+	advanced, err := a.pruneToolResultsToProjectionLocked(CompactionTriggerPressure)
+	a.sess.compactionRunMu.Unlock()
+	if err != nil || !advanced {
+		t.Fatalf("clear advanced=%v err=%v", advanced, err)
+	}
+	visible := a.modelVisibleMessages()
+	if got := countToolResultsContaining(visible, toolClearMarker); got != 1 {
+		t.Fatalf("cleared results = %d, want 1", got)
+	}
+	if len(a.sess.compactionState.Projection.ToolReceipts) != 1 {
+		t.Fatalf("receipts = %+v", a.sess.compactionState.Projection.ToolReceipts)
+	}
+	receipt := a.sess.compactionState.Projection.ToolReceipts[0]
+	ref := strings.TrimPrefix(receipt.ArchiveRef, "session://tool-results/")
+	reader := &sessionToolResultTool{session: func() *Session { return sess }}
+	page, err := reader.Execute(context.Background(), json.RawMessage(fmt.Sprintf(`{"tool_call_id":"call-0","result_ref":%q,"limit":24576}`, ref)))
+	if err != nil {
+		t.Fatalf("recall archived result: %v", err)
+	}
+	if !strings.Contains(page, full) || !strings.Contains(page, `"complete":true`) {
+		t.Fatalf("recalled page did not contain the exact archived body: %.300q", page)
 	}
 }

@@ -12,12 +12,19 @@ type summaryProjectionCommit struct {
 	canonical, fold, projected                       []provider.Message
 	result                                           foldSummary
 	transcriptVersion, projectionVersion, generation uint64
+	cacheGeneration                                  uint64
+	projectionGeneration                             uint64
 	activeTurn                                       int64
 	trigger, summary, inputHash, outputHash          string
+	maintenanceMode                                  string
+	providerWindowSource                             string
 	sourceTokens, projectionTokens                   int
+	toolReceipts                                     []ToolCallReceipt
+	projectionItems                                  []ProjectionItem
+	activeCheckpoint                                 *ActiveTurnCheckpoint
 	// covered is the canonical length the frozen projection body represents;
 	// messages past it splice live from the transcript.
-	covered int
+	covered, coveredFrom int
 }
 
 // commitSummaryProjection CAS-installs a checkpoint under compactionMu:
@@ -32,7 +39,9 @@ func (a *Agent) commitSummaryProjection(commit summaryProjectionCommit) (Compact
 		len(current) != len(commit.canonical) ||
 		coveredPrefixHash(current, len(current)) != coveredPrefixHash(commit.canonical, len(commit.canonical)) ||
 		a.sess.compactionState.Projection.ProjectionVersion != commit.projectionVersion ||
-		a.sess.compactionState.Generation != commit.generation {
+		a.sess.compactionState.Generation != commit.generation ||
+		a.sess.compactionState.ProjectionGeneration != commit.projectionGeneration ||
+		a.sess.compactionState.CacheGeneration != commit.cacheGeneration {
 		a.sess.compactionMu.Unlock()
 		return CompactionState{}, errCompressStaleContext
 	}
@@ -67,18 +76,32 @@ func (a *Agent) summaryProjectionState(commit summaryProjectionCommit) Compactio
 		ProjectionVersion: projectionVersion, CoveredCount: commit.covered, CoveredPrefixHash: coveredHash,
 		InputHash: commit.inputHash, OutputHash: commit.outputHash, InputTokens: commit.sourceTokens,
 		ResultTokens: commit.projectionTokens, SavedTokens: max(0, commit.sourceTokens-commit.projectionTokens),
-		SummaryHash: summaryHash, CacheBreak: true, CreatedAt: now,
+		SummaryHash: summaryHash, CacheBreak: true, Mode: commit.maintenanceMode,
+		ProjectionGeneration: commit.projectionGeneration + 1, CacheGeneration: commit.cacheGeneration + 1,
+		CoveredCanonicalFrom: commit.coveredFrom, CoveredCanonicalTo: commit.covered,
+		FoldUnits: len(a.contextUnits(commit.fold)), SummaryPromptTokens: commit.result.FoldTokens,
+		SummaryLatencyMS: commit.result.LatencyMS, ProviderWindowSource: commit.providerWindowSource,
+		CreatedAt: now,
+	}
+	if commit.result.Usage != nil {
+		receipt.SummaryPromptTokens = commit.result.Usage.PromptTokens
+		receipt.SummaryOutputTokens = commit.result.Usage.CompletionTokens
 	}
 	// LastReceipt is authoritative; do not mirror last_trigger/last_mode/token
 	// counters or top-level blocked_* fields (stripped again on save).
 	return CompactionState{
 		SchemaVersion: compactionStateSchemaCurrent, TranscriptVersion: commit.transcriptVersion,
-		Generation: commit.generation + 1, PromptCacheKey: a.currentPromptCacheKey(),
+		Generation: commit.generation + 1, ProjectionGeneration: commit.projectionGeneration + 1,
+		CacheGeneration:          commit.cacheGeneration + 1,
+		MaintenanceRearmAtTokens: commit.projectionTokens + a.maintenanceRearmDelta(),
+		PromptCacheKey:           a.currentPromptCacheKey(),
 		Projection: ContextProjection{
 			Messages: commit.projected, TranscriptVersion: commit.transcriptVersion,
+			Items: append([]ProjectionItem(nil), commit.projectionItems...), ActiveCheckpoint: commit.activeCheckpoint,
 			ProjectionVersion: projectionVersion, CoveredCount: commit.covered, CoveredPrefixHash: coveredHash,
 			SummaryHash: summaryHash, SourceTokens: commit.sourceTokens, ProjectionTokens: commit.projectionTokens,
 			ViewInputHash: commit.inputHash, ViewOutputHash: commit.outputHash, CreatedAt: now,
+			ToolReceipts: append([]ToolCallReceipt(nil), commit.toolReceipts...),
 		},
 		LastReceipt: receipt, UpdatedAt: now,
 	}

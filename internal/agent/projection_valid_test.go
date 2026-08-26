@@ -237,6 +237,10 @@ func TestForceThresholdNoopReturnsCompactionRequired(t *testing.T) {
 	if !errors.Is(err, ErrCompactionRequired) {
 		t.Fatalf("err = %v, want ErrCompactionRequired", err)
 	}
+	var detail *IrreducibleContextError
+	if !errors.As(err, &detail) || detail.Reason == "" {
+		t.Fatalf("err = %v, want structured irreducible detail", err)
+	}
 }
 
 func TestSummarizeOnceDoesNotRetry(t *testing.T) {

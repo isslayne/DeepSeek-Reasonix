@@ -21,7 +21,7 @@ func TestCollectQualityProducesPublicSafeSummary(t *testing.T) {
 		`{"role":"tool","tool_call_id":"edit-1","name":"edit_file","content":"updated ` + secret + `"}`,
 		`{"role":"assistant","reasoning_content":"verify the change","tool_calls":[{"id":"test-1","name":"bash","arguments":"{\"command\":\"go test ./...\"}"}]}`,
 		`{"role":"tool","tool_call_id":"test-1","name":"bash","content":"ok"}`,
-		`{"role":"user","content":"<compaction-summary>\nprivate summary ` + secret + `"}`,
+		`{"role":"user","content":"<compaction-summary>\nprivate summary ` + secret + `","projection_kind":"history_checkpoint"}`,
 		`{"role":"assistant","content":"done"}`,
 	}
 	if err := os.WriteFile(path, []byte(strings.Join(messages, "\n")+"\n"), 0o644); err != nil {

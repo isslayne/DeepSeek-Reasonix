@@ -13,8 +13,6 @@ import (
 	"reasonix/internal/provider"
 )
 
-const outputBudgetReserve = 8 * 1024
-
 const learnedOutputBudgetTTL = 24 * time.Hour
 
 type learnedOutputBudgetCacheEntry struct {
@@ -480,9 +478,8 @@ func (a *Agent) effectiveOutputBudget(req provider.Request) (int, bool, error) {
 
 func (a *Agent) admitOutputBudget(req provider.Request) (contextAdmission, error) {
 	adm := contextAdmission{
-		ReserveTokens: outputBudgetReserve,
-		LastRecovery:  a.lastAdmission().LastRecovery,
-		Source:        provider.ContextBudgetSourceUnknown,
+		LastRecovery: a.lastAdmission().LastRecovery,
+		Source:       provider.ContextBudgetSourceUnknown,
 	}
 	if adm.LastRecovery == "" {
 		adm.LastRecovery = contextRecoveryNone
@@ -515,6 +512,7 @@ func (a *Agent) admitOutputBudget(req provider.Request) (contextAdmission, error
 	adm.MaxOutputTokens = policy.MaxOutputTokens
 	window := a.effectiveContextWindow()
 	adm.WindowTokens = window
+	adm.ReserveTokens = protocolMarginForWindow(window)
 	learnedWindow := window > 0 && (a.contextWindow <= 0 || window < a.contextWindow)
 	adm.Source = admissionSource(req.MaxTokens, policy, learnedWindow)
 	if window <= 0 {
@@ -523,7 +521,7 @@ func (a *Agent) admitOutputBudget(req provider.Request) (contextAdmission, error
 	}
 	est := a.estimatedRequestTokens(req)
 	adm.PromptTokens = est
-	physical := window - est - outputBudgetReserve
+	physical := window - est - adm.ReserveTokens
 	adm.PhysicalRemaining = physical
 	shared := policy.WindowMode == provider.ContextWindowShared
 	if !shared {

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -31,13 +32,21 @@ func TestNormalizeModelRequestMessagesDoesNotMutateInput(t *testing.T) {
 
 func TestPressurePruneNeverPromotesRawToolContent(t *testing.T) {
 	const rawOnlySentinel = "RAW-ONLY-PRESSURE-SENTINEL"
-	bounded := strings.Repeat("b", toolPruneThresholdRunes+1)
+	bounded := strings.Repeat("b", toolPruneThresholdRunes*3)
 	raw := strings.Repeat("r", 100) + rawOnlySentinel + strings.Repeat("r", toolPruneThresholdRunes+1)
-	sess := &Session{Messages: []provider.Message{
+	msgs := []provider.Message{
 		{Role: provider.RoleSystem, Content: "system"},
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "call-1", Name: "read_file", Arguments: `{}`}}},
 		{Role: provider.RoleTool, ToolCallID: "call-1", Name: "read_file", Content: bounded, RawContent: raw},
-	}}
+	}
+	for i := 0; i < pressureKeepRecentToolGroups; i++ {
+		id := fmt.Sprintf("recent-%d", i)
+		msgs = append(msgs,
+			provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: id, Name: "read_file", Arguments: `{}`}}},
+			provider.Message{Role: provider.RoleTool, ToolCallID: id, Name: "read_file", Content: "small"},
+		)
+	}
+	sess := &Session{Messages: msgs}
 	a := New(nil, tool.NewRegistry(), sess, Options{}, event.Discard)
 
 	a.sess.compactionRunMu.Lock()
@@ -50,7 +59,7 @@ func TestPressurePruneNeverPromotesRawToolContent(t *testing.T) {
 	if strings.Contains(joinContents(visible), rawOnlySentinel) {
 		t.Fatal("pressure projection promoted local RawContent")
 	}
-	if got := visible[len(visible)-1]; !strings.Contains(got.Content, toolPruneMarker) || got.RawContent != "" {
+	if got := visible[2]; !strings.Contains(got.Content, toolPruneMarker) || got.RawContent != "" {
 		t.Fatalf("provider tool result = %+v, want pruned bounded Content without RawContent", got)
 	}
 	stored := sess.Snapshot()[2]

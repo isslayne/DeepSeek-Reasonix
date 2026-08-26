@@ -59,7 +59,14 @@ func (a *Agent) emitContextMaintenance(r *ContextMaintenanceReceipt) {
 		Status: r.Status, Action: r.Action, Trigger: r.Trigger, OperationID: r.OperationID,
 		InputTokens: r.InputTokens, ResultTokens: r.ResultTokens, SavedTokens: r.SavedTokens,
 		AffectedToolResults: r.AffectedToolResults, ProjectionVersion: r.ProjectionVersion,
-		CacheBreak: r.CacheBreak, Reason: r.Reason,
+		ProjectionGeneration: r.ProjectionGeneration, CacheGeneration: r.CacheGeneration,
+		CacheBreak: r.CacheBreak, Mode: r.Mode,
+		CoveredCanonicalFrom: r.CoveredCanonicalFrom, CoveredCanonicalTo: r.CoveredCanonicalTo,
+		FoldUnits: r.FoldUnits, SummaryPromptTokens: r.SummaryPromptTokens,
+		SummaryOutputTokens: r.SummaryOutputTokens, SummaryLatencyMS: r.SummaryLatencyMS,
+		ArchiveBytes: r.ArchiveBytes, ArchiveRefsCount: r.ArchiveRefsCount,
+		KeptRecentToolGroups: r.KeptRecentToolGroups, ProviderWindowSource: r.ProviderWindowSource,
+		IrreducibleReason: r.IrreducibleReason, Reason: r.Reason,
 	}})
 }
 
@@ -72,6 +79,17 @@ func (a *Agent) recordContextMaintenanceBlocked(inputHash, trigger, action, reas
 // generation. Automatic Prepare will not re-enter summary until the generation
 // advances (successful install, manual compress, or lineage change).
 func (a *Agent) recordContextMaintenanceOutcome(inputHash, trigger, action, status, reason string) {
+	a.recordContextMaintenanceOutcomeWithReason(inputHash, trigger, action, status, reason, "")
+}
+
+func (a *Agent) recordContextMaintenanceIrreducible(inputHash, trigger string, err *IrreducibleContextError) {
+	if err == nil {
+		return
+	}
+	a.recordContextMaintenanceOutcomeWithReason(inputHash, trigger, "irreducible", "blocked", err.Error(), string(err.Reason))
+}
+
+func (a *Agent) recordContextMaintenanceOutcomeWithReason(inputHash, trigger, action, status, reason, irreducibleReason string) {
 	if a == nil || a.sess.conversation == nil {
 		return
 	}
@@ -103,6 +121,10 @@ func (a *Agent) recordContextMaintenanceOutcome(inputHash, trigger, action, stat
 		return
 	}
 	now := time.Now().UTC()
+	mode := ""
+	if action == "irreducible" {
+		mode = MaintenanceIrreducible
+	}
 	state.SchemaVersion = compactionStateSchemaCurrent
 	state.TranscriptVersion = transcriptVersion
 	state.PromptCacheKey = promptCacheKey
@@ -120,7 +142,9 @@ func (a *Agent) recordContextMaintenanceOutcome(inputHash, trigger, action, stat
 		OperationID: fmt.Sprintf("%s-%s-%d", status, action, state.Generation), Status: status, Action: action,
 		Trigger: trigger, SourceProjection: state.Projection.ProjectionVersion,
 		ProjectionVersion: state.Projection.ProjectionVersion, InputHash: inputHash,
-		BlockedInputHash: inputHash, Reason: reason, CreatedAt: now,
+		BlockedInputHash: inputHash, Reason: reason, Mode: mode,
+		ProjectionGeneration: state.ProjectionGeneration, CacheGeneration: state.CacheGeneration,
+		ProviderWindowSource: a.lastAdmission().Source, IrreducibleReason: irreducibleReason, CreatedAt: now,
 	}
 	state.UpdatedAt = now
 	a.sess.compactionState = state
@@ -135,10 +159,12 @@ func (a *Agent) recordContextMaintenanceOutcome(inputHash, trigger, action, stat
 }
 
 func (a *Agent) emitCompactionTelemetry(t CompactionTelemetry) {
-	detail := fmt.Sprintf("trigger=%s mode=%s summary_input=%s cache=%s src=%d fold=%d spans=%d proj=%d in=%d out=%d hit=%d miss=%d write=%d reqs=%d user_kept=%d user_dropped=%d",
-		t.Trigger, t.Mode, t.SummaryInputMode, t.CacheState, t.SourceTokens, t.FoldTokens, t.Spans, t.ProjectionTokens,
+	detail := fmt.Sprintf("trigger=%s mode=%s maintenance_mode=%s summary_input=%s cache=%s src=%d fold=%d fold_units=%d spans=%d proj=%d in=%d out=%d hit=%d miss=%d write=%d reqs=%d user_kept=%d user_dropped=%d covered_from=%d covered_to=%d projection_gen=%d cache_gen=%d cache_break=%t summary_latency_ms=%d window_source=%s irreducible_reason=%s",
+		t.Trigger, t.Mode, t.MaintenanceMode, t.SummaryInputMode, t.CacheState, t.SourceTokens, t.FoldTokens, t.FoldUnits, t.Spans, t.ProjectionTokens,
 		t.InputTokens, t.OutputTokens, t.CacheHitTokens, t.CacheMissTokens, t.CacheWriteTokens, t.RequestCount,
-		t.UserTurnsKept, t.UserTurnsDropped)
+		t.UserTurnsKept, t.UserTurnsDropped, t.CoveredCanonicalFrom, t.CoveredCanonicalTo,
+		t.ProjectionGeneration, t.CacheGeneration, t.BreaksPromptCache, t.SummaryLatencyMS,
+		t.ProviderWindowSource, t.IrreducibleReason)
 	if t.ProviderRequestID != "" {
 		detail += " provider_request_id=" + t.ProviderRequestID
 	}

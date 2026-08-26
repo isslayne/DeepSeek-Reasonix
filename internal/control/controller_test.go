@@ -1135,7 +1135,7 @@ func TestRecoverInterruptedTurnAfterCompactionRelocatesVisibleTurn(t *testing.T)
 	}
 	compacted.Replace([]provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
-		{Role: provider.RoleUser, Content: "<compaction-summary>\nold work\n</compaction-summary>"},
+		{Role: provider.RoleUser, Content: "<compaction-summary>\nold work\n</compaction-summary>", ProjectionKind: "history_checkpoint"},
 		{Role: provider.RoleUser, Content: "update a.txt", CreatedAt: meta.InFlightTurn.StartedAt.UnixMilli() + 1},
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{
 			ID: "write-1", Name: "write_file", Arguments: `{"path":"a.txt","content":"ok"}`,
@@ -1349,7 +1349,7 @@ func TestSnapshotActivityPersistsOwnedCompactionRewrite(t *testing.T) {
 	}
 	loaded.Replace([]provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
-		{Role: provider.RoleUser, Content: "<compaction-summary>\nSummary of earlier conversation: first -> one\n</compaction-summary>"},
+		{Role: provider.RoleUser, Content: "<compaction-summary>\nSummary of earlier conversation: first -> one\n</compaction-summary>", ProjectionKind: "history_checkpoint"},
 		{Role: provider.RoleUser, Content: "second"},
 	})
 	loaded.IncrementRewrite()
@@ -1457,7 +1457,7 @@ func TestRecoveryBranchPersistsLaterOwnedCompactionRewrite(t *testing.T) {
 	}
 	localSess.Replace([]provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
-		{Role: provider.RoleUser, Content: "<compaction-summary>\nSummary of recovery branch work: first -> local\n</compaction-summary>"},
+		{Role: provider.RoleUser, Content: "<compaction-summary>\nSummary of recovery branch work: first -> local\n</compaction-summary>", ProjectionKind: "history_checkpoint"},
 		{Role: provider.RoleUser, Content: "continue"},
 	})
 	localSess.IncrementRewrite()
@@ -1860,7 +1860,7 @@ func TestSnapshotConflictAdoptionResetsRewriteBaseline(t *testing.T) {
 	msgs := adopted.Snapshot()
 	adopted.Replace([]provider.Message{
 		msgs[0],
-		{Role: provider.RoleUser, Content: "<compaction-summary>\nfirst -> newer\n</compaction-summary>"},
+		{Role: provider.RoleUser, Content: "<compaction-summary>\nfirst -> newer\n</compaction-summary>", ProjectionKind: "history_checkpoint"},
 	})
 	adopted.IncrementRewrite()
 	if err := c.SnapshotActivity(); err != nil {
@@ -1914,7 +1914,7 @@ func TestConcurrentCompactionAndAutosaveNeverBranch(t *testing.T) {
 			msgs := sess.Snapshot()
 			sess.Replace([]provider.Message{
 				msgs[0],
-				{Role: provider.RoleUser, Content: fmt.Sprintf("<compaction-summary>\nrounds through %d\n</compaction-summary>", i)},
+				{Role: provider.RoleUser, Content: fmt.Sprintf("<compaction-summary>\nrounds through %d\n</compaction-summary>", i), ProjectionKind: "history_checkpoint"},
 				msgs[len(msgs)-1],
 			})
 			sess.IncrementRewrite()
