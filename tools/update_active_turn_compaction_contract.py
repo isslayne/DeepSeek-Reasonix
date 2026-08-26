@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pathlib
 
+ACTIVE = pathlib.Path("internal/agent/compact_active_turn_test.go")
 CACHEHIT = pathlib.Path("internal/agent/cachehit_e2e_test.go")
 RECOVERY = pathlib.Path("internal/agent/context_recovery_tool_loop_test.go")
 
@@ -12,6 +13,23 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     if count != 1:
         raise RuntimeError(f"{label}: expected exactly one match, found {count}")
     return text.replace(old, new, 1)
+
+
+def update_active_turn() -> None:
+    text = ACTIVE.read_text(encoding="utf-8")
+    text = replace_once(
+        text,
+        '''\tif plan.prefixEnd != 2 || plan.summaryStart != 0 {
+\t\tt.Fatalf("plan prefix/summary = %d/%d, want 2/0", plan.prefixEnd, plan.summaryStart)
+\t}
+''',
+        '''\tif plan.prefixEnd != 2 || plan.summaryStart != 1 {
+\t\tt.Fatalf("plan prefix/summary = %d/%d, want 2/1", plan.prefixEnd, plan.summaryStart)
+\t}
+''',
+        "align bounded active-turn summary start",
+    )
+    ACTIVE.write_text(text, encoding="utf-8")
 
 
 def update_cachehit() -> None:
@@ -106,6 +124,7 @@ def update_recovery() -> None:
 
 
 def main() -> None:
+    update_active_turn()
     update_cachehit()
     update_recovery()
 
