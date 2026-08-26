@@ -104,7 +104,7 @@ jobs:
 
       - name: Install Wails CLI
         shell: bash
-        run: go install "github.com/wailsapp/wails/v2/cmd/wails@$(tr -d '[:space:]' < .wails-version)"
+        run: make wails-install
 
       - name: Build and package ARM64 app
         shell: bash
