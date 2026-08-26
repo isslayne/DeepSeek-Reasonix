@@ -55,7 +55,7 @@ def main() -> None:
         "a.planCompactionFold(msgs, false)",
         "single-group pressure contract",
     )
-    force_test = r"""func TestPlanCompactionFoldForceCanCheckpointSingleCompleteToolGroup(t *testing.T) {
+    force_test = """func TestPlanCompactionFoldForceCanCheckpointSingleCompleteToolGroup(t *testing.T) {
 \tconst activeCreatedAt = int64(42)
 \tmsgs := []provider.Message{
 \t\t{Role: provider.RoleSystem, Content: "system"},
