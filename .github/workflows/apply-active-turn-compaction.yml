@@ -43,7 +43,9 @@ jobs:
           python3 tools/apply_active_turn_compaction.py
           python3 tools/update_active_turn_compaction_contract.py
           python3 tools/update_active_turn_force_boundary.py
+          python3 tools/update_active_turn_summary_request.py
           gofmt -w \
+            internal/agent/compact.go \
             internal/agent/compact_projection.go \
             internal/agent/compact_active_turn.go \
             internal/agent/compact_active_turn_test.go \
@@ -77,6 +79,7 @@ jobs:
           rm -f tools/apply_active_turn_compaction.py
           rm -f tools/update_active_turn_compaction_contract.py
           rm -f tools/update_active_turn_force_boundary.py
+          rm -f tools/update_active_turn_summary_request.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
