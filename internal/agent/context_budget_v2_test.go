@@ -36,6 +36,9 @@ func TestSummaryPlannerAndSenderShareMinimumOutputAdmission(t *testing.T) {
 	region := []provider.Message{{Role: provider.RoleUser, Content: strings.Repeat("work ", 2_000)}}
 	req := a.summaryRequestForPurpose(region, "", summaryPurposeActiveCheckpoint)
 	desired, minimum := a.summaryOutputEnvelope(summaryPurposeActiveCheckpoint)
+	if desired != activeTurnSummaryMaxTokens {
+		t.Fatalf("active checkpoint desired output = %d, want %d", desired, activeTurnSummaryMaxTokens)
+	}
 	planned := a.requestBudget(req, desired, minimum)
 	if err := a.applySummaryAdmission(&req, summaryPurposeActiveCheckpoint); err != nil {
 		t.Fatal(err)

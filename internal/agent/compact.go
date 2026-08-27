@@ -459,12 +459,10 @@ func (a *Agent) summaryOutputEnvelope(purpose summaryPurpose) (desired, minimum 
 	if purpose != summaryPurposeActiveCheckpoint {
 		return desired, minimum
 	}
-	window := a.effectiveContextWindow()
-	desired = activeTurnSummaryMaxTokens
-	if window > 0 {
-		desired = min(activeTurnSummaryMaxTokens, max(512, window/50))
-	}
-	return desired, minimum
+	// Keep the emergency checkpoint compact, but do not derive its output limit
+	// from a percentage of the context window. requestBudget is the single source
+	// of truth for provider limits and the actual shared-window headroom.
+	return activeTurnSummaryMaxTokens, minimum
 }
 
 func (a *Agent) applySummaryAdmission(req *provider.Request, purpose summaryPurpose) error {
