@@ -162,10 +162,9 @@ func waitForWindowsPIDFile(t *testing.T, path string, done chan windowsBashRunRe
 		}
 		select {
 		case result := <-done:
-			// The shell can finish just before this select while its final file
-			// write becomes visible. Check once more before reporting the early
-			// exit, then preserve output so CI distinguishes a launch failure from
-			// a slow hosted runner.
+			// The shell can finish just before this select while its final write
+			// becomes visible. Check once more and preserve output so CI can
+			// distinguish a launch failure from a slow hosted runner.
 			data, readErr := os.ReadFile(path)
 			if readErr == nil {
 				pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))

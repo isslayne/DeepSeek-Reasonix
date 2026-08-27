@@ -264,12 +264,20 @@ func (a *App) cancelAllTabBuilds() {
 
 func listCatalogSessionsForDirectory(ctx context.Context, catalog *sessioncatalog.Catalog,
 	target sessioncatalog.DirectoryTarget, directory string) ([]sessioncatalog.SessionRecord, error) {
+	// The catalog preserves path spellings for display, while the desktop treats
+	// case-only Windows variants as one path. Query by the spelling used by the
+	// catalog target, then apply workspace ownership with desktop path semantics.
+	queryDirectory := directory
+	if sameDesktopPath(target.Path, directory) {
+		queryDirectory = target.Path
+	}
 	for range 2 {
 		records := []sessioncatalog.SessionRecord{}
 		cursor := ""
 		for {
-			page, err := catalog.ListSessions(ctx, sessioncatalog.SessionPageRequest{Scope: target.Scope,
-				WorkspaceRoot: target.WorkspaceRoot, Directory: directory, Cursor: cursor, Limit: sessioncatalog.MaxLimit})
+			page, err := catalog.ListSessions(ctx, sessioncatalog.SessionPageRequest{
+				Scope: "all", Directory: queryDirectory, Cursor: cursor, Limit: sessioncatalog.MaxLimit,
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -278,12 +286,29 @@ func listCatalogSessionsForDirectory(ctx context.Context, catalog *sessioncatalo
 			}
 			records = append(records, page.Items...)
 			if page.NextCursor == "" {
-				return records, nil
+				return filterCatalogSessionsForTarget(records, target), nil
 			}
 			cursor = page.NextCursor
 		}
 	}
 	return []sessioncatalog.SessionRecord{}, nil
+}
+
+func filterCatalogSessionsForTarget(records []sessioncatalog.SessionRecord,
+	target sessioncatalog.DirectoryTarget) []sessioncatalog.SessionRecord {
+	out := make([]sessioncatalog.SessionRecord, 0, len(records))
+	project := strings.TrimSpace(target.Scope) == "project"
+	for _, record := range records {
+		if project {
+			if record.Scope != "project" || !sameProjectRoot(record.WorkspaceRoot, target.WorkspaceRoot) {
+				continue
+			}
+		} else if record.Scope == "project" {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out
 }
 
 // syncSessionCatalogMetadataBounded is the only form the long-lived catalog
