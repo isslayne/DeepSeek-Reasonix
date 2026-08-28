@@ -1849,6 +1849,13 @@ func (a *Agent) streamWithFrozen(ctx context.Context, turn int, sink event.Sink,
 					return collect(stored, err)
 				}
 				stored, display := finishReasoning()
+				// Freeze provider-owned terminal semantics before provider.response.
+				// Extensions may replace visible content and usage telemetry, but
+				// cannot turn a truncated provider response into a committable turn.
+				providerFinishReason := ""
+				if usage != nil {
+					providerFinishReason = usage.FinishReason
+				}
 				// provider.response: extensions rule on the assembled terminal
 				// response before it is persisted. A replacement becomes the
 				// visible assistant turn (the user's transcript); a block fails
@@ -1878,14 +1885,17 @@ func (a *Agent) streamWithFrozen(ctx context.Context, turn int, sink event.Sink,
 					})
 				}
 				usage = provider.UsageWithRequestAttemptCount(ctx, usage)
-				// A clean terminal never reports partialToolStarted: the calls
-				// slice is now authoritative and the partial cards were merged.
+				// This is a transport terminal; semantic admission happens in
+				// runSamplingAttempt. Preserve partial-tool state for rejection
+				// diagnostics even when complete calls were also assembled.
 				return streamedTurn{
 					text: finalText, reasoning: finalReasoning, signature: signature,
 					reasoningID: reasoningID, reasoningStatus: reasoningStatus,
 					reasoningComplete: reasoningComplete,
 					calls:             calls, responsesItems: responsesItems, serverSearch: search.calls, usage: usage,
-					partialCalls: partialCalls, maxArgChars: maxArgChars,
+					providerFinishReason: providerFinishReason,
+					partialToolStarted:   partialToolStarted,
+					partialCalls:         partialCalls, maxArgChars: maxArgChars,
 				}
 			}
 			chunk = c

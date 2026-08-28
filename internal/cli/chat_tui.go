@@ -4337,13 +4337,17 @@ func (m *chatTUI) ingestEvent(e event.Event) {
 	}
 	if e.Kind == event.StreamAttempt {
 		// Body-phase replay: clear any in-progress tool presentation and surface
-		// a reconnect marker. Text already in terminal scrollback is left as-is.
+		// an outcome marker. Text already in terminal scrollback is left as-is.
 		if e.StreamAttempt.Action == event.StreamAttemptDiscard {
 			m.toolPartial = ""
 			m.toolTail = nil
 			m.toolStreamIdx = -1
 			m.toolLineCount = 0
-			m.commitLine(dim("  ↻ stream interrupted — reconnecting…"))
+			if e.StreamAttempt.Reason == event.StreamAttemptReasonCompletionRejected {
+				m.commitLine(dim("  ↳ model response rejected — not committed"))
+			} else {
+				m.commitLine(dim("  ↻ stream interrupted — reconnecting…"))
+			}
 		}
 		return
 	}

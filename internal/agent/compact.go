@@ -529,8 +529,16 @@ func (a *Agent) summarizeForPurpose(ctx context.Context, region []provider.Messa
 			return "", usage, ctx.Err()
 		case chunk, ok := <-ch:
 			if !ok {
-				if usage != nil && usage.FinishReason == "length" {
-					return "", usage, fmt.Errorf("%w: provider reached the output token limit", errSummaryOutputTruncated)
+				finishReason := ""
+				if usage != nil {
+					finishReason = usage.FinishReason
+				}
+				if admissionErr := admitCompletion(finishReason); admissionErr != nil {
+					detail := fmt.Sprintf("provider ended with non-committable finish reason %q", finishReason)
+					if finishReason == "length" {
+						detail = "provider reached the output token limit"
+					}
+					return "", usage, fmt.Errorf("%w: %s: %w", errSummaryOutputTruncated, detail, admissionErr)
 				}
 				s := strings.TrimSpace(b.String())
 				if s == "" {

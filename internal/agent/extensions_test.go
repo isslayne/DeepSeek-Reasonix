@@ -614,6 +614,51 @@ func TestProviderResponseReplaceIsTranscript(t *testing.T) {
 	}
 }
 
+func TestProviderResponseCannotRewriteTruncatedTerminalToStop(t *testing.T) {
+	client := &fakeDispatchClient{interceptFn: func(ev protocol.InterceptEvent, _ json.RawMessage) (protocol.InterceptResult, error) {
+		if ev == protocol.EventProviderResponse {
+			return replaceWith(t, dispatch.ProviderResponsePayload{
+				Text: "EXTENSION CLAIMS THIS IS COMPLETE",
+				Usage: &protocol.ProviderUsage{
+					CompletionTokens: 4096,
+					TotalTokens:      4096,
+					FinishReason:     "stop",
+				},
+			}), nil
+		}
+		return protocol.InterceptResult{Decision: protocol.DecisionContinue}, nil
+	}}
+	d := newExtDispatcher(client, true, nil, extension.PointProviderResponse)
+	mp := &mockProvider{name: "p", chunks: []provider.Chunk{
+		{Type: provider.ChunkText, Text: "PARTIAL"},
+		{Type: provider.ChunkUsage, Usage: &provider.Usage{
+			CompletionTokens: 4096,
+			TotalTokens:      4096,
+			FinishReason:     "length",
+		}},
+		{Type: provider.ChunkDone},
+	}}
+	sess := NewSession("sys")
+	sink := &recordSink{}
+	a := New(mp, tool.NewRegistry(), sess, Options{Extensions: d}, sink)
+
+	err := a.Run(withNoClosedLoop(context.Background()), "one")
+	var rejected *CompletionRejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("Run error = %v, want CompletionRejectedError", err)
+	}
+	if rejected.FinishReason != "length" {
+		t.Fatalf("finish reason = %q, want frozen provider reason length", rejected.FinishReason)
+	}
+	if n := len(assistantMessages(sess)); n != 0 {
+		t.Fatalf("rewritten truncated response persisted %d assistant turns, want 0", n)
+	}
+	usageEvents := sink.kinds(event.Usage)
+	if len(usageEvents) != 1 || usageEvents[0].Usage == nil || usageEvents[0].Usage.FinishReason != "length" {
+		t.Fatalf("usage events = %+v, want frozen provider finish reason length", usageEvents)
+	}
+}
+
 func TestProviderResponseBlock(t *testing.T) {
 	client := &fakeDispatchClient{interceptFn: func(ev protocol.InterceptEvent, _ json.RawMessage) (protocol.InterceptResult, error) {
 		if ev == protocol.EventProviderResponse {

@@ -164,6 +164,10 @@ const (
 	StreamAttemptCommit  StreamAttemptAction = "commit"
 )
 
+// StreamAttemptReasonCompletionRejected closes a speculative attempt whose
+// transport completed but whose provider terminal was not safe to commit.
+const StreamAttemptReasonCompletionRejected = "completion_rejected"
+
 // RetryScope distinguishes connection+header retries, body-phase stream
 // retries, and host-classified protocol recovery. Older clients ignore an
 // unknown value and still render the generic retry state.
@@ -176,7 +180,8 @@ const (
 )
 
 // StreamAttemptInfo carries host-local bookkeeping for one sampling attempt.
-// Reason is a fixed enum (connection_reset | premature_eof | idle_timeout).
+// Reason is a fixed host enum such as connection_reset, premature_eof,
+// idle_timeout, context_limit, reasoning_replay, or completion_rejected.
 type StreamAttemptInfo struct {
 	ID      string
 	Action  StreamAttemptAction

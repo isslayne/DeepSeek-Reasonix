@@ -21,21 +21,22 @@ import (
 // available, and a failed recovery can still fall back to the complete first
 // response without re-running any tool.
 type streamedTurn struct {
-	text               string
-	reasoning          string
-	signature          string
-	reasoningID        string
-	reasoningStatus    string
-	reasoningComplete  bool
-	calls              []provider.ToolCall
-	responsesItems     []json.RawMessage
-	serverSearch       []provider.ServerSearchCall
-	usage              *provider.Usage
-	interrupted        bool
-	partialToolStarted bool
-	partialCalls       []provider.ToolCall
-	maxArgChars        int // peak streaming tool-arg size for failed-attempt estimates
-	err                error
+	text                 string
+	reasoning            string
+	signature            string
+	reasoningID          string
+	reasoningStatus      string
+	reasoningComplete    bool
+	calls                []provider.ToolCall
+	responsesItems       []json.RawMessage
+	serverSearch         []provider.ServerSearchCall
+	usage                *provider.Usage
+	providerFinishReason string
+	interrupted          bool
+	partialToolStarted   bool
+	partialCalls         []provider.ToolCall
+	maxArgChars          int // peak streaming tool-arg size for failed-attempt estimates
+	err                  error
 }
 
 func (s streamedTurn) assistantMessage() provider.Message {

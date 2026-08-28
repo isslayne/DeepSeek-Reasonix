@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"reasonix/internal/event"
 	"reasonix/internal/provider"
@@ -65,6 +66,16 @@ func (a *Agent) handleSamplingError(
 	result, last streamedTurn,
 	billable *provider.Usage,
 ) (retry bool, terminal streamedTurn) {
+	if errors.Is(result.err, ErrCompletionRejected) {
+		// A non-committable response is terminal for this run, not a transport
+		// retry. Discard any buffered speculative events and close the
+		// attempt lifecycle before the outer loop records bounded LocalOnly
+		// diagnostics and returns the typed rejection.
+		streamSink.Discard()
+		a.emitStreamAttempt(attemptID, event.StreamAttemptDiscard, attempt, event.StreamAttemptReasonCompletionRejected, result.err)
+		last.usage = finalizeSamplingUsage(billable, result.usage)
+		return false, last
+	}
 	if provider.IsStreamInterrupted(result.err) && attempt < maxSamplingAttempts {
 		streamSink.Discard()
 		reason := provider.StreamInterruptReason(result.err)

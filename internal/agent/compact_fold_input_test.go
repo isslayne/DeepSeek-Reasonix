@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -25,6 +26,7 @@ type deadlineInspectProvider struct {
 
 type summaryChunksProvider struct {
 	chunks []provider.Chunk
+	calls  int
 }
 
 type observedSummaryLimitProvider struct {
@@ -52,6 +54,7 @@ func (p *observedSummaryLimitProvider) Stream(_ context.Context, req provider.Re
 
 func (p *summaryChunksProvider) Name() string { return "summary-chunks" }
 func (p *summaryChunksProvider) Stream(context.Context, provider.Request) (<-chan provider.Chunk, error) {
+	p.calls++
 	ch := make(chan provider.Chunk, len(p.chunks))
 	for _, chunk := range p.chunks {
 		ch <- chunk
@@ -125,6 +128,34 @@ func TestSummaryCollectorRejectsEmptyAndLengthLimitedOutput(t *testing.T) {
 			a := New(prov, tool.NewRegistry(), NewSession("system"), Options{}, event.Discard)
 			if _, _, err := a.summarize(context.Background(), []provider.Message{{Role: provider.RoleUser, Content: "old"}}, ""); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("summarize error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSummaryCollectorRejectsIncompleteTerminal(t *testing.T) {
+	for _, reason := range []string{"incomplete", "content_filter", "repetition_truncation"} {
+		t.Run(reason, func(t *testing.T) {
+			prov := &summaryChunksProvider{chunks: []provider.Chunk{
+				{Type: provider.ChunkText, Text: "partial checkpoint"},
+				{Type: provider.ChunkUsage, Usage: &provider.Usage{FinishReason: reason}},
+				{Type: provider.ChunkDone},
+			}}
+			a := New(prov, tool.NewRegistry(), NewSession("system"), Options{}, event.Discard)
+
+			_, _, err := a.summarize(context.Background(), []provider.Message{{Role: provider.RoleUser, Content: "old"}}, "")
+			var rejected *CompletionRejectedError
+			if !errors.As(err, &rejected) {
+				t.Fatalf("summarize error = %v, want CompletionRejectedError", err)
+			}
+			if !errors.Is(err, errSummaryOutputTruncated) {
+				t.Fatalf("summarize error = %v, want errSummaryOutputTruncated", err)
+			}
+			if rejected.FinishReason != reason {
+				t.Fatalf("finish reason = %q, want %s", rejected.FinishReason, reason)
+			}
+			if prov.calls != 1 {
+				t.Fatalf("summary provider calls = %d, want 1", prov.calls)
 			}
 		})
 	}
