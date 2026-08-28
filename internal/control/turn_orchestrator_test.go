@@ -1220,7 +1220,7 @@ func (r *cancelStrippingRunner) Run(ctx context.Context, input string) error {
 func (r *compactingErrorRunner) Run(_ context.Context, input string) error {
 	r.session.Replace([]provider.Message{
 		{Role: provider.RoleSystem, Content: "system"},
-		{Role: provider.RoleUser, Content: "<compaction-summary>\nold work\n</compaction-summary>"},
+		{Role: provider.RoleUser, Content: "<compaction-summary>\nold work\n</compaction-summary>", ProjectionKind: "history_checkpoint"},
 		{Role: provider.RoleUser, Content: input, CreatedAt: time.Now().UnixMilli()},
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "write-1", Name: "write_file", Arguments: `{"path":"a.txt","content":"ok"}`}}},
 		{Role: provider.RoleTool, ToolCallID: "write-1", Name: "write_file", Content: "wrote a.txt"},

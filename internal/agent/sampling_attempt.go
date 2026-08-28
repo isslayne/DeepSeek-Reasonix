@@ -13,6 +13,14 @@ import (
 func (a *Agent) runSamplingAttempt(ctx context.Context, turn int, sink event.Sink, frozen *samplingRequest, attemptID string) streamedTurn {
 	before := provider.RequestAttemptCount(ctx)
 	result := a.streamWithFrozen(ctx, turn, sink, frozen, attemptID)
+	if result.err == nil {
+		result.err = admitCompletion(result.providerFinishReason)
+		if result.err != nil {
+			// Keep extension-replaced numeric telemetry, but terminal semantics
+			// must agree with the frozen provider reason that caused rejection.
+			result.usage = preserveRejectedFinishReason(result.usage, result.providerFinishReason)
+		}
+	}
 	delta := max(provider.RequestAttemptCount(ctx)-before, 0)
 	result.usage = estimateFailedAttemptUsage(result.usage, *frozen, result, delta)
 	if result.usage != nil {
@@ -23,6 +31,18 @@ func (a *Agent) runSamplingAttempt(ctx context.Context, turn int, sink event.Sin
 		result.usage = &provider.Usage{RequestCount: delta}
 	}
 	return result
+}
+
+func preserveRejectedFinishReason(usage *provider.Usage, finishReason string) *provider.Usage {
+	if finishReason == "" {
+		return usage
+	}
+	if usage == nil {
+		return &provider.Usage{FinishReason: finishReason}
+	}
+	clone := *usage
+	clone.FinishReason = finishReason
+	return &clone
 }
 
 func (a *Agent) samplingAttemptSinks() (*deferredStreamSink, event.Sink) {

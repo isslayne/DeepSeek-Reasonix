@@ -597,8 +597,8 @@ func TestCompactTriggerIgnoresConfiguredOutputBudget(t *testing.T) {
 	if got := a.compactTrigger(); got != 85_000 {
 		t.Fatalf("trigger = %d, want 85000 (output budget must not change it)", got)
 	}
-	if got := a.hardInputCeiling(); got != 100_000-protocolReserveTokens {
-		t.Fatalf("hard ceiling = %d, want window minus protocol reserve only", got)
+	if got := a.hardInputCeiling(); got != 100_000-protocolMarginForWindow(100_000) {
+		t.Fatalf("hard ceiling = %d, want window minus dynamic protocol margin", got)
 	}
 }
 

@@ -21,8 +21,8 @@ func TestCompactTriggerIndependentOfOutputBudget(t *testing.T) {
 		t.Fatalf("trigger after larger output budget = %d, want %d", got, want)
 	}
 	hard := a.hardInputCeiling()
-	if hard != 128_000-protocolReserveTokens {
-		t.Fatalf("hard ceiling = %d, want window-protocolReserve", hard)
+	if hard != 128_000-protocolMarginForWindow(128_000) {
+		t.Fatalf("hard ceiling = %d, want window-dynamic protocol margin", hard)
 	}
 }
 

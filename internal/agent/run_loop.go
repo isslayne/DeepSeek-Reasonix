@@ -21,21 +21,22 @@ import (
 // available, and a failed recovery can still fall back to the complete first
 // response without re-running any tool.
 type streamedTurn struct {
-	text               string
-	reasoning          string
-	signature          string
-	reasoningID        string
-	reasoningStatus    string
-	reasoningComplete  bool
-	calls              []provider.ToolCall
-	responsesItems     []json.RawMessage
-	serverSearch       []provider.ServerSearchCall
-	usage              *provider.Usage
-	interrupted        bool
-	partialToolStarted bool
-	partialCalls       []provider.ToolCall
-	maxArgChars        int // peak streaming tool-arg size for failed-attempt estimates
-	err                error
+	text                 string
+	reasoning            string
+	signature            string
+	reasoningID          string
+	reasoningStatus      string
+	reasoningComplete    bool
+	calls                []provider.ToolCall
+	responsesItems       []json.RawMessage
+	serverSearch         []provider.ServerSearchCall
+	usage                *provider.Usage
+	providerFinishReason string
+	interrupted          bool
+	partialToolStarted   bool
+	partialCalls         []provider.ToolCall
+	maxArgChars          int // peak streaming tool-arg size for failed-attempt estimates
+	err                  error
 }
 
 func (s streamedTurn) assistantMessage() provider.Message {
@@ -226,6 +227,7 @@ func (a *Agent) beginRunTurn(ctx context.Context, input string) (rawInput string
 	// old literal spelled out are already there from the reset at the top.
 	state = &a.turn
 	state.seenTodoProgress = make(map[string]struct{})
+	state.maintenanceAttempts = make(map[MaintenanceAttemptKey]struct{})
 	state.executorHandoff = a.executorHandoffGuard && strings.Contains(input, executorHandoffMarker)
 	state.input = input
 	state.budget = runBudget{started: time.Now()}
@@ -367,7 +369,8 @@ func (a *Agent) streamWithSamplingRecovery(ctx context.Context, turn int) stream
 		billable, last = a.recordSamplingAttempt(billable, result)
 
 		if result.err != nil {
-			if next, retryContext, _ := a.recoverContextLimit(ctx, frozen, result.err, &contextRecovery); retryContext {
+			next, retryContext, _, recoveryErr := a.recoverContextLimit(ctx, frozen, result.err, &contextRecovery)
+			if retryContext {
 				if streamSink != nil {
 					streamSink.Discard()
 				}
@@ -376,12 +379,9 @@ func (a *Agent) streamWithSamplingRecovery(ctx context.Context, turn int) stream
 				attempt = 0
 				continue
 			}
-			retry, terminal := a.handleSamplingError(ctx, attemptID, attempt, streamSink, &frozen, result, last, billable)
+			terminal, retry := a.finishSamplingError(ctx, attemptID, attempt, streamSink, &frozen, result, last, billable, recoveryErr)
 			if retry {
 				continue
-			}
-			if provider.AsContextLimitError(result.err) != nil {
-				a.setLastRecovery(contextRecoveryFailed)
 			}
 			return terminal
 		}
@@ -463,6 +463,17 @@ func (a *Agent) streamWithSamplingRecovery(ctx context.Context, turn int) stream
 		return result
 	}
 	return last
+}
+
+func (a *Agent) finishSamplingError(ctx context.Context, attemptID string, attempt int, streamSink *deferredStreamSink, frozen *samplingRequest, result, last streamedTurn, billable *provider.Usage, recoveryErr error) (streamedTurn, bool) {
+	if recoveryErr != nil {
+		result.err, last.err = recoveryErr, recoveryErr
+	}
+	retry, terminal := a.handleSamplingError(ctx, attemptID, attempt, streamSink, frozen, result, last, billable)
+	if provider.AsContextLimitError(result.err) != nil && !retry {
+		a.setLastRecovery(contextRecoveryFailed)
+	}
+	return terminal, retry
 }
 
 func (a *Agent) emitProtocolRetry(attempt int, hasFallback bool) {

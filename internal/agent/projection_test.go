@@ -33,9 +33,11 @@ func TestCompactionStateAtomicSaveLoad(t *testing.T) {
 			SourceTokens:      1000,
 			ProjectionTokens:  200,
 		},
-		PromptCacheKey: "ws|sess|model",
-		LastCacheState: CacheStateCold,
-		Generation:     7,
+		PromptCacheKey:       "ws|sess|model",
+		LastCacheState:       CacheStateCold,
+		Generation:           7,
+		ProjectionGeneration: 5,
+		CacheGeneration:      4,
 		LastReceipt: &ContextMaintenanceReceipt{
 			Status: "applied", Action: "summary", ProjectionVersion: 1,
 			InputHash: "in", OutputHash: "out", SavedTokens: 800,
@@ -54,7 +56,7 @@ func TestCompactionStateAtomicSaveLoad(t *testing.T) {
 	if len(got.Projection.Messages) != 2 || got.Projection.CoveredCount != 10 {
 		t.Fatalf("projection = %+v", got.Projection)
 	}
-	if got.Generation != 7 || got.LastReceipt == nil || got.LastReceipt.OutputHash != "out" || got.LastReceipt.ProjectionVersion != 1 {
+	if got.Generation != 7 || got.ProjectionGeneration != 5 || got.CacheGeneration != 4 || got.LastReceipt == nil || got.LastReceipt.OutputHash != "out" || got.LastReceipt.ProjectionVersion != 1 {
 		t.Fatalf("v3 maintenance receipt not round-tripped: %+v", got)
 	}
 }
@@ -534,10 +536,10 @@ func TestCompactSummarizesMidSessionUserTurns(t *testing.T) {
 	sess := &Session{Messages: []provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
 		{Role: provider.RoleUser, Content: "first task"},
-		{Role: provider.RoleAssistant, Content: big},
+		{Role: provider.RoleAssistant, Content: big, ToolCalls: []provider.ToolCall{{ID: "1", Name: "read_file", Arguments: `{}`}}},
 		{Role: provider.RoleTool, ToolCallID: "1", Name: "read_file", Content: big},
 		{Role: provider.RoleUser, Content: midFact},
-		{Role: provider.RoleAssistant, Content: big},
+		{Role: provider.RoleAssistant, Content: big, ToolCalls: []provider.ToolCall{{ID: "2", Name: "read_file", Arguments: `{}`}}},
 		{Role: provider.RoleTool, ToolCallID: "2", Name: "read_file", Content: big},
 		{Role: provider.RoleUser, Content: "next"},
 		{Role: provider.RoleAssistant, Content: "ok"},
@@ -762,6 +764,7 @@ func TestCompactFoldsSingleLargeMessage(t *testing.T) {
 	prov := &fakeProvider{reply: "- captured the large file contents"}
 	sess := &Session{Messages: []provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "1", Name: "read_file", Arguments: `{}`}}},
 		{Role: provider.RoleTool, ToolCallID: "1", Name: "read_file", Content: strings.Repeat("large output line\n", 500)},
 		{Role: provider.RoleUser, Content: "next"},
 		{Role: provider.RoleAssistant, Content: "ok"},
@@ -779,7 +782,7 @@ func TestCompactFoldsSingleLargeMessage(t *testing.T) {
 	if !hasCompactionSummary(proj) || !strings.Contains(joinContents(proj), "large file contents") {
 		t.Fatalf("single large message was not summarized into projection: %+v", proj)
 	}
-	if len(prov.got) == 0 || !strings.Contains(prov.got[1].Content, "large output line") {
+	if len(prov.got) < 3 || !strings.Contains(prov.got[2].Content, "large output line") {
 		t.Fatalf("summarizer did not receive the large message: %+v", prov.got)
 	}
 }

@@ -252,8 +252,9 @@ func TestEffectiveOutputBudgetClipsSharedWindowRequest(t *testing.T) {
 	if got <= 0 || got >= prov.budget {
 		t.Fatalf("clipped budget = %d, want 0 < budget < %d", got, prov.budget)
 	}
-	if got+950_000 > a.contextWindow-outputBudgetReserve {
-		t.Fatalf("input + output = %d, exceeds reserved shared window %d", got+950_000, a.contextWindow-outputBudgetReserve)
+	margin := protocolMarginForWindow(a.contextWindow)
+	if got+950_000 > a.contextWindow-margin {
+		t.Fatalf("input + output = %d, exceeds reserved shared window %d", got+950_000, a.contextWindow-margin)
 	}
 }
 
@@ -277,8 +278,9 @@ func TestCalibratedOutputBudgetIncludesReplayedReasoning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("effectiveOutputBudget: %v", err)
 	}
-	if !clipped || budget > 20_000 {
-		t.Fatalf("replayed reasoning budget = %d clipped=%v, want a clipped budget <= 20000", budget, clipped)
+	margin := protocolMarginForWindow(a.contextWindow)
+	if !clipped || budget <= 0 || after+budget+margin > a.contextWindow {
+		t.Fatalf("replayed reasoning budget = %d clipped=%v prompt=%d margin=%d window=%d", budget, clipped, after, margin, a.contextWindow)
 	}
 }
 
@@ -411,9 +413,9 @@ func TestPrepareSamplingRequestClipsSharedWindowOutput(t *testing.T) {
 func TestEffectiveOutputBudgetRejectsExhaustedSharedWindow(t *testing.T) {
 	prov := &sharedWindowTestProvider{budget: 128 * 1024, shared: true}
 	a := &Agent{agentConfig: agentConfig{contextWindow: 1_048_576}, svc: agentServices{prov: prov}, sess: sessionRuntime{output: outputBudgetState{outputBudget: prov.budget}}}
-	msgs := []provider.Message{{Role: provider.RoleUser, Content: strings.Repeat("字", 1_045_000)}}
-	a.sess.output.lastUsage.Store(&provider.Usage{PromptTokens: 1_045_000})
-	a.setPromptTokenCalibration(1_045_000, requestCalibrationShapeOf(provider.Request{Messages: msgs}))
+	msgs := []provider.Message{{Role: provider.RoleUser, Content: strings.Repeat("字", 1_048_000)}}
+	a.sess.output.lastUsage.Store(&provider.Usage{PromptTokens: 1_048_000})
+	a.setPromptTokenCalibration(1_048_000, requestCalibrationShapeOf(provider.Request{Messages: msgs}))
 
 	_, _, err := a.effectiveOutputBudget(provider.Request{Messages: msgs})
 	if !errors.Is(err, ErrCompactionRequired) {

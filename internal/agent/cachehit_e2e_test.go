@@ -88,8 +88,26 @@ func (m *mockDeepSeek) handler(w http.ResponseWriter, r *http.Request) {
 	if isSummarizeRequest(body) {
 		msgs := decodeMessages(body)
 		replayed := msgs[:len(msgs)-1]
-		if len(m.prevMessages) > 0 && commonPrefixMsgs(m.prevMessages, replayed) != len(replayed) {
-			m.t.Errorf("summary request did not replay a byte-identical cached conversation prefix")
+		var final struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(msgs[len(msgs)-1], &final); err != nil {
+			m.t.Errorf("decode summary instruction: %v", err)
+		}
+		activeCheckpoint := strings.Contains(final.Content, activeTurnCheckpointInstruction)
+		if len(m.prevMessages) > 0 {
+			if activeCheckpoint {
+				// Emergency active-turn recovery intentionally trades one cache reset
+				// for a bounded request. Its immutable semantic prefix is the system
+				// message plus the original active user task, both byte-identical.
+				if len(m.prevMessages) < 2 || len(replayed) < 2 ||
+					!bytes.Equal(m.prevMessages[0], replayed[0]) ||
+					!bytes.Equal(m.prevMessages[1], replayed[1]) {
+					m.t.Errorf("active-turn summary did not retain the byte-identical system/task anchor")
+				}
+			} else if commonPrefixMsgs(m.prevMessages, replayed) != len(replayed) {
+				m.t.Errorf("history summary request did not replay a byte-identical cached conversation prefix")
+			}
 		}
 		writeSSE(w, m.t,
 			streamChunk(deltaText("- goal: keep going\n- decisions: none\n- pending: continue")),
@@ -235,8 +253,8 @@ func TestCacheHitClimbsWithoutCompaction(t *testing.T) {
 	}
 }
 
-// A window too small to hold even the system and active tail cannot be repaired
-// by fabricating a mechanical digest.
+// A window too small to hold even the summary request and its minimum output
+// budget returns the structured irreducible contract.
 func TestTooSmallWindowReturnsCompactionRequired(t *testing.T) {
 	mock := &mockDeepSeek{t: t, withTools: true, reasoning: longReasoning, toolRounds: 30}
 	srv := httptest.NewServer(http.HandlerFunc(mock.handler))
@@ -244,8 +262,13 @@ func TestTooSmallWindowReturnsCompactionRequired(t *testing.T) {
 
 	a, sink := newAgent(t, srv.URL, mock.tools(), 900 /*window tok*/, 4 /*recentKeep*/)
 
-	if err := a.Run(context.Background(), strings.Repeat("please consider this requirement. ", 6)); !errors.Is(err, ErrCompactionRequired) {
-		t.Fatalf("Run = %v, want ErrCompactionRequired", err)
+	err := a.Run(context.Background(), strings.Repeat("please consider this requirement. ", 6))
+	if !errors.Is(err, ErrContextIrreducible) || !errors.Is(err, ErrCompactionRequired) {
+		t.Fatalf("Run = %v, want structured ErrContextIrreducible with legacy compatibility", err)
+	}
+	var detail *IrreducibleContextError
+	if !errors.As(err, &detail) || detail.Reason == "" || detail.EffectiveWindow != 900 {
+		t.Fatalf("irreducible detail = %+v, err=%v", detail, err)
 	}
 	_ = sink
 }

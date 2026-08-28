@@ -155,16 +155,7 @@ func ToWire(e event.Event) Event {
 			Summary: e.Compaction.Summary, Archive: e.Compaction.Archive,
 		}
 	case event.ContextMaintenanceEvent:
-		if m := e.Maintenance; m != nil {
-			w.Maintenance = &ContextMaintenance{
-				Status: m.Status, Action: m.Action, Trigger: m.Trigger,
-				OperationID: m.OperationID, InputTokens: m.InputTokens,
-				ResultTokens: m.ResultTokens, SavedTokens: m.SavedTokens,
-				AffectedToolResults: m.AffectedToolResults,
-				ProjectionVersion:   m.ProjectionVersion, CacheBreak: m.CacheBreak,
-				Reason: m.Reason,
-			}
-		}
+		w.Maintenance = toWireContextMaintenance(e.Maintenance)
 	case event.GuardianAssessment:
 		w.Guardian = ToWireGuardian(e.Guardian)
 	case event.ExtensionSurface, event.ExtensionStatus:
@@ -216,6 +207,24 @@ func ToWire(e event.Event) Event {
 		}
 	}
 	return w
+}
+
+func toWireContextMaintenance(m *event.ContextMaintenance) *ContextMaintenance {
+	if m == nil {
+		return nil
+	}
+	return &ContextMaintenance{
+		Status: m.Status, Action: m.Action, Trigger: m.Trigger, OperationID: m.OperationID,
+		InputTokens: m.InputTokens, ResultTokens: m.ResultTokens, SavedTokens: m.SavedTokens,
+		AffectedToolResults: m.AffectedToolResults, ProjectionVersion: m.ProjectionVersion,
+		ProjectionGeneration: m.ProjectionGeneration, CacheGeneration: m.CacheGeneration,
+		CacheBreak: m.CacheBreak, Mode: m.Mode, CoveredCanonicalFrom: m.CoveredCanonicalFrom,
+		CoveredCanonicalTo: m.CoveredCanonicalTo, FoldUnits: m.FoldUnits,
+		SummaryPromptTokens: m.SummaryPromptTokens, SummaryOutputTokens: m.SummaryOutputTokens,
+		SummaryLatencyMS: m.SummaryLatencyMS, ArchiveBytes: m.ArchiveBytes,
+		ArchiveRefsCount: m.ArchiveRefsCount, KeptRecentToolGroups: m.KeptRecentToolGroups,
+		ProviderWindowSource: m.ProviderWindowSource, IrreducibleReason: m.IrreducibleReason, Reason: m.Reason,
+	}
 }
 
 func toWireUsage(e event.Event) *Usage {
@@ -445,15 +454,17 @@ type Usage struct {
 
 // CacheDiagnostics is the JSON form of cache prefix diagnostics.
 type CacheDiagnostics struct {
-	PrefixHash          string   `json:"prefixHash"`
-	PrefixChanged       bool     `json:"prefixChanged"`
-	PrefixChangeReasons []string `json:"prefixChangeReasons,omitempty"`
-	SystemHash          string   `json:"systemHash"`
-	ToolsHash           string   `json:"toolsHash"`
-	LogRewriteVersion   int      `json:"logRewriteVersion"`
-	ToolSchemaTokens    int      `json:"toolSchemaTokens"`
-	CacheMissTokens     int      `json:"cacheMissTokens"`
-	CacheHitTokens      int      `json:"cacheHitTokens"`
+	PrefixHash           string   `json:"prefixHash"`
+	PrefixChanged        bool     `json:"prefixChanged"`
+	PrefixChangeReasons  []string `json:"prefixChangeReasons,omitempty"`
+	SystemHash           string   `json:"systemHash"`
+	ToolsHash            string   `json:"toolsHash"`
+	LogRewriteVersion    int      `json:"logRewriteVersion"`
+	ToolSchemaTokens     int      `json:"toolSchemaTokens"`
+	CacheMissTokens      int      `json:"cacheMissTokens"`
+	CacheHitTokens       int      `json:"cacheHitTokens"`
+	ProjectionGeneration uint64   `json:"projectionGeneration,omitempty"`
+	CacheGeneration      uint64   `json:"cacheGeneration,omitempty"`
 }
 
 // Guardian is the JSON form of an event.GuardianResult.
@@ -518,15 +529,17 @@ func ToWireAsk(a event.Ask) *Ask {
 // ToWireCacheDiagnostics converts cache diagnostics into their JSON wire form.
 func ToWireCacheDiagnostics(d *event.CacheDiagnostics) *CacheDiagnostics {
 	return &CacheDiagnostics{
-		PrefixHash:          d.PrefixHash,
-		PrefixChanged:       d.PrefixChanged,
-		PrefixChangeReasons: append([]string(nil), d.PrefixChangeReasons...),
-		SystemHash:          d.SystemHash,
-		ToolsHash:           d.ToolsHash,
-		LogRewriteVersion:   d.LogRewriteVersion,
-		ToolSchemaTokens:    d.ToolSchemaTokens,
-		CacheMissTokens:     d.CacheMissTokens,
-		CacheHitTokens:      d.CacheHitTokens,
+		PrefixHash:           d.PrefixHash,
+		PrefixChanged:        d.PrefixChanged,
+		PrefixChangeReasons:  append([]string(nil), d.PrefixChangeReasons...),
+		SystemHash:           d.SystemHash,
+		ToolsHash:            d.ToolsHash,
+		LogRewriteVersion:    d.LogRewriteVersion,
+		ToolSchemaTokens:     d.ToolSchemaTokens,
+		CacheMissTokens:      d.CacheMissTokens,
+		CacheHitTokens:       d.CacheHitTokens,
+		ProjectionGeneration: d.ProjectionGeneration,
+		CacheGeneration:      d.CacheGeneration,
 	}
 }
 
@@ -582,17 +595,31 @@ var kindNames = map[event.Kind]string{
 
 // ContextMaintenance is the JSON form of event.ContextMaintenance.
 type ContextMaintenance struct {
-	Status              string `json:"status,omitempty"`
-	Action              string `json:"action,omitempty"`
-	Trigger             string `json:"trigger,omitempty"`
-	OperationID         string `json:"operationId,omitempty"`
-	InputTokens         int    `json:"inputTokens,omitempty"`
-	ResultTokens        int    `json:"resultTokens,omitempty"`
-	SavedTokens         int    `json:"savedTokens,omitempty"`
-	AffectedToolResults int    `json:"affectedToolResults,omitempty"`
-	ProjectionVersion   uint64 `json:"projectionVersion,omitempty"`
-	CacheBreak          bool   `json:"cacheBreak,omitempty"`
-	Reason              string `json:"reason,omitempty"`
+	Status               string `json:"status,omitempty"`
+	Action               string `json:"action,omitempty"`
+	Trigger              string `json:"trigger,omitempty"`
+	OperationID          string `json:"operationId,omitempty"`
+	InputTokens          int    `json:"inputTokens,omitempty"`
+	ResultTokens         int    `json:"resultTokens,omitempty"`
+	SavedTokens          int    `json:"savedTokens,omitempty"`
+	AffectedToolResults  int    `json:"affectedToolResults,omitempty"`
+	ProjectionVersion    uint64 `json:"projectionVersion,omitempty"`
+	ProjectionGeneration uint64 `json:"projectionGeneration,omitempty"`
+	CacheGeneration      uint64 `json:"cacheGeneration,omitempty"`
+	CacheBreak           bool   `json:"cacheBreak,omitempty"`
+	Mode                 string `json:"mode,omitempty"`
+	CoveredCanonicalFrom int    `json:"coveredCanonicalFrom,omitempty"`
+	CoveredCanonicalTo   int    `json:"coveredCanonicalTo,omitempty"`
+	FoldUnits            int    `json:"foldUnits,omitempty"`
+	SummaryPromptTokens  int    `json:"summaryPromptTokens,omitempty"`
+	SummaryOutputTokens  int    `json:"summaryOutputTokens,omitempty"`
+	SummaryLatencyMS     int64  `json:"summaryLatencyMs,omitempty"`
+	ArchiveBytes         int    `json:"archiveBytes,omitempty"`
+	ArchiveRefsCount     int    `json:"archiveRefsCount,omitempty"`
+	KeptRecentToolGroups int    `json:"keptRecentToolGroups,omitempty"`
+	ProviderWindowSource string `json:"providerWindowSource,omitempty"`
+	IrreducibleReason    string `json:"irreducibleReason,omitempty"`
+	Reason               string `json:"reason,omitempty"`
 }
 
 // ExtensionSurface is the JSON form of an event.ExtensionSurfacePayload.

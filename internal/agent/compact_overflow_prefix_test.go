@@ -29,7 +29,7 @@ func (p *overflowSummaryProvider) Stream(_ context.Context, req provider.Request
 }
 
 func TestOverflowSummarizesLargestAdmissibleContiguousPrefix(t *testing.T) {
-	sess := foldableSessionOverForce(120)
+	sess := foldableSessionOverForce(140)
 	prov := &overflowSummaryProvider{}
 	a := agentOverForceWindow(t, prov, sess, 60_000)
 	msgs := sess.Snapshot()
@@ -49,8 +49,9 @@ func TestOverflowSummarizesLargestAdmissibleContiguousPrefix(t *testing.T) {
 		t.Fatalf("summary requests = %d, want 1", len(prov.requests))
 	}
 	req := prov.requests[0]
-	if got, max := a.estimatedRequestTokens(req), a.effectiveContextWindow()-outputBudgetReserve-256; got > max {
-		t.Fatalf("summary request tokens = %d, exceeds admissible input %d", got, max)
+	budget := a.requestBudget(req, req.MaxTokens, 256)
+	if budget.EffectiveOutput < budget.MinimumOutput {
+		t.Fatalf("summary request budget = %+v, want an admissible minimum output", budget)
 	}
 	if receipt := a.sess.compactionState.LastReceipt; receipt == nil || receipt.CoveredCount != safeEnd {
 		t.Fatalf("receipt = %+v, want covered prefix %d", receipt, safeEnd)
@@ -74,8 +75,9 @@ func TestMaximumSafeSummaryPrefixKeepsToolPairsTogether(t *testing.T) {
 		svc:         agentServices{prov: &overflowSummaryProvider{}},
 		sess:        sessionRuntime{conversation: &Session{Messages: msgs}},
 	}
-	promptThroughFirstResult := a.estimatedRequestTokens(a.summaryRequest(msgs[1:4], ""))
-	a.contextWindow = promptThroughFirstResult + outputBudgetReserve + 256
+	promptThroughUser := a.estimatedRequestTokens(a.summaryRequest(msgs[1:2], ""))
+	base := promptThroughUser + 256
+	a.contextWindow = base + protocolMarginForWindow(base) + 1
 	end := a.maximumSafeSummaryPrefixEnd(msgs, 1, len(msgs)-1, "")
 	if end != 2 {
 		t.Fatalf("fold boundary = %d, want 2 so the assistant call and both results stay in the tail", end)

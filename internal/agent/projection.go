@@ -20,7 +20,9 @@ const (
 	compactionStateSchemaV1      = 1
 	compactionStateSchemaV2      = 2
 	compactionStateSchemaV3      = 3
-	compactionStateSchemaCurrent = compactionStateSchemaV3
+	compactionStateSchemaV4      = 4
+	compactionStateSchemaV5      = 5
+	compactionStateSchemaCurrent = compactionStateSchemaV5
 )
 
 // Cache state labels for resume/preflight telemetry. They never enter the
@@ -29,6 +31,16 @@ const (
 	CacheStateWarm    = "warm"
 	CacheStateCold    = "cold"
 	CacheStateUnknown = "unknown"
+)
+
+// Maintenance mode labels distinguish cache behavior and safety fallbacks.
+const (
+	MaintenanceHistoryCacheAligned     = "history_cache_aligned"
+	MaintenanceHistoryBoundedNonPrefix = "history_bounded_nonprefix"
+	MaintenanceActiveCheckpoint        = "active_checkpoint_nonprefix"
+	MaintenanceMechanicalFallback      = "mechanical_fallback"
+	MaintenanceLosslessToolClear       = "lossless_tool_clear"
+	MaintenanceIrreducible             = "irreducible"
 )
 
 // Compaction trigger labels.
@@ -52,14 +64,17 @@ const (
 	SummaryInputCachePrefix        = "cache_prefix"
 	SummaryInputExtensionRewritten = "extension_rewritten"
 	SummaryInputNonPrefix          = "non_prefix"
+	SummaryInputMechanicalFallback = "mechanical_fallback"
 )
 
 // ContextProjection is the model-visible view of a session. The canonical
 // transcript in Session.Messages is never replaced by this structure.
 type ContextProjection struct {
-	Messages          []provider.Message `json:"messages"`
-	TranscriptVersion uint64             `json:"transcript_version"`
-	ProjectionVersion uint64             `json:"projection_version"`
+	Messages          []provider.Message    `json:"messages"`
+	Items             []ProjectionItem      `json:"items,omitempty"`
+	ActiveCheckpoint  *ActiveTurnCheckpoint `json:"active_checkpoint,omitempty"`
+	TranscriptVersion uint64                `json:"transcript_version"`
+	ProjectionVersion uint64                `json:"projection_version"`
 	// CoveredCount is the canonical prefix represented by the frozen projection
 	// body. Model-visible context is projection.Messages + canonical[CoveredCount:].
 	CoveredCount int `json:"covered_count"`
@@ -72,35 +87,53 @@ type ContextProjection struct {
 	// ViewInputHash/ViewOutputHash make free maintenance idempotent across
 	// retries and resume. They fingerprint the visible view, not canonical
 	// storage, so a projection can evolve without rewriting the transcript.
-	ViewInputHash  string    `json:"view_input_hash,omitempty"`
-	ViewOutputHash string    `json:"view_output_hash,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	ViewInputHash  string `json:"view_input_hash,omitempty"`
+	ViewOutputHash string `json:"view_output_hash,omitempty"`
+	// ToolReceipts preserve exact call/result identities for deterministic
+	// placeholders. The canonical transcript remains the lossless archive; the
+	// opaque ArchiveRef is resolved only through the current-session capability.
+	ToolReceipts []ToolCallReceipt `json:"tool_receipts,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
 }
 
 // ContextMaintenanceReceipt is the durable, provider-neutral outcome of one
 // context maintenance transaction. Transcript content is intentionally not
 // included; hashes and counts are sufficient for dedupe and diagnostics.
 type ContextMaintenanceReceipt struct {
-	OperationID         string    `json:"operation_id,omitempty"`
-	Status              string    `json:"status,omitempty"` // planned|applied|noop|blocked|failed
-	Action              string    `json:"action,omitempty"` // snip|prune|summary|native_tool_clear|noop
-	Trigger             string    `json:"trigger,omitempty"`
-	SourceProjection    uint64    `json:"source_projection,omitempty"`
-	ProjectionVersion   uint64    `json:"projection_version,omitempty"`
-	CoveredCount        int       `json:"covered_count,omitempty"`
-	CoveredPrefixHash   string    `json:"covered_prefix_hash,omitempty"`
-	InputHash           string    `json:"input_hash,omitempty"`
-	OutputHash          string    `json:"output_hash,omitempty"`
-	InputTokens         int       `json:"input_tokens,omitempty"`
-	ResultTokens        int       `json:"result_tokens,omitempty"`
-	SavedTokens         int       `json:"saved_tokens,omitempty"`
-	AffectedToolResults int       `json:"affected_tool_results,omitempty"`
-	SummaryHash         string    `json:"summary_hash,omitempty"`
-	Archive             string    `json:"archive,omitempty"`
-	CacheBreak          bool      `json:"cache_break,omitempty"`
-	Reason              string    `json:"reason,omitempty"`
-	BlockedInputHash    string    `json:"blocked_input_hash,omitempty"`
-	CreatedAt           time.Time `json:"created_at,omitempty"`
+	OperationID          string    `json:"operation_id,omitempty"`
+	Status               string    `json:"status,omitempty"` // planned|applied|noop|blocked|failed
+	Action               string    `json:"action,omitempty"` // snip|prune|summary|native_tool_clear|noop
+	Trigger              string    `json:"trigger,omitempty"`
+	SourceProjection     uint64    `json:"source_projection,omitempty"`
+	ProjectionVersion    uint64    `json:"projection_version,omitempty"`
+	CoveredCount         int       `json:"covered_count,omitempty"`
+	CoveredPrefixHash    string    `json:"covered_prefix_hash,omitempty"`
+	InputHash            string    `json:"input_hash,omitempty"`
+	OutputHash           string    `json:"output_hash,omitempty"`
+	InputTokens          int       `json:"input_tokens,omitempty"`
+	ResultTokens         int       `json:"result_tokens,omitempty"`
+	SavedTokens          int       `json:"saved_tokens,omitempty"`
+	AffectedToolResults  int       `json:"affected_tool_results,omitempty"`
+	SummaryHash          string    `json:"summary_hash,omitempty"`
+	Archive              string    `json:"archive,omitempty"`
+	CacheBreak           bool      `json:"cache_break,omitempty"`
+	Mode                 string    `json:"mode,omitempty"`
+	ProjectionGeneration uint64    `json:"projection_generation,omitempty"`
+	CacheGeneration      uint64    `json:"cache_generation,omitempty"`
+	CoveredCanonicalFrom int       `json:"covered_canonical_from,omitempty"`
+	CoveredCanonicalTo   int       `json:"covered_canonical_to,omitempty"`
+	FoldUnits            int       `json:"fold_units,omitempty"`
+	SummaryPromptTokens  int       `json:"summary_prompt_tokens,omitempty"`
+	SummaryOutputTokens  int       `json:"summary_output_tokens,omitempty"`
+	SummaryLatencyMS     int64     `json:"summary_latency_ms,omitempty"`
+	ArchiveBytes         int       `json:"archive_bytes,omitempty"`
+	ArchiveRefsCount     int       `json:"archive_refs_count,omitempty"`
+	KeptRecentToolGroups int       `json:"kept_recent_tool_groups,omitempty"`
+	ProviderWindowSource string    `json:"provider_window_source,omitempty"`
+	IrreducibleReason    string    `json:"irreducible_reason,omitempty"`
+	Reason               string    `json:"reason,omitempty"`
+	BlockedInputHash     string    `json:"blocked_input_hash,omitempty"`
+	CreatedAt            time.Time `json:"created_at,omitempty"`
 }
 
 // CompactionOutcome reports whether compactToProjection installed a projection.
@@ -115,20 +148,23 @@ const (
 
 // CompactionState is the session context sidecar payload.
 type CompactionState struct {
-	SchemaVersion      int                        `json:"schema_version"`
-	TranscriptVersion  uint64                     `json:"transcript_version"`
-	Projection         ContextProjection          `json:"projection"`
-	PromptCacheKey     string                     `json:"prompt_cache_key,omitempty"`
-	LastCacheState     string                     `json:"last_cache_state,omitempty"`
-	LastTrigger        string                     `json:"last_trigger,omitempty"`
-	LastMode           string                     `json:"last_mode,omitempty"`
-	LastSourceTokens   int                        `json:"last_source_tokens,omitempty"`
-	LastResultTokens   int                        `json:"last_result_tokens,omitempty"`
-	LastCompactionCost float64                    `json:"last_compaction_cost,omitempty"`
-	Generation         uint64                     `json:"generation,omitempty"`
-	LastReceipt        *ContextMaintenanceReceipt `json:"last_receipt,omitempty"`
-	BlockedInputHash   string                     `json:"blocked_input_hash,omitempty"`
-	BlockedReason      string                     `json:"blocked_reason,omitempty"`
+	SchemaVersion            int                        `json:"schema_version"`
+	TranscriptVersion        uint64                     `json:"transcript_version"`
+	Projection               ContextProjection          `json:"projection"`
+	PromptCacheKey           string                     `json:"prompt_cache_key,omitempty"`
+	LastCacheState           string                     `json:"last_cache_state,omitempty"`
+	LastTrigger              string                     `json:"last_trigger,omitempty"`
+	LastMode                 string                     `json:"last_mode,omitempty"`
+	LastSourceTokens         int                        `json:"last_source_tokens,omitempty"`
+	LastResultTokens         int                        `json:"last_result_tokens,omitempty"`
+	LastCompactionCost       float64                    `json:"last_compaction_cost,omitempty"`
+	Generation               uint64                     `json:"generation,omitempty"`
+	ProjectionGeneration     uint64                     `json:"projection_generation,omitempty"`
+	CacheGeneration          uint64                     `json:"cache_generation,omitempty"`
+	MaintenanceRearmAtTokens int                        `json:"maintenance_rearm_at_tokens,omitempty"`
+	LastReceipt              *ContextMaintenanceReceipt `json:"last_receipt,omitempty"`
+	BlockedInputHash         string                     `json:"blocked_input_hash,omitempty"`
+	BlockedReason            string                     `json:"blocked_reason,omitempty"`
 	// NativeContextEditingAccepted latches the first successful native request.
 	// ContextEditingFallbackLocal persists the only allowed request-shape switch:
 	// an explicit unsupported response before that latch was set.
@@ -140,25 +176,35 @@ type CompactionState struct {
 // CompactionTelemetry is the structured observability record for one
 // compaction attempt. Sensitive transcript content is intentionally omitted.
 type CompactionTelemetry struct {
-	Trigger           string `json:"trigger"`
-	CacheState        string `json:"cache_state"`
-	Mode              string `json:"mode"`
-	Native            bool   `json:"native"`
-	SourceTokens      int    `json:"source_tokens"`
-	FoldTokens        int    `json:"fold_tokens"` // summarizer input after any shortening
-	Spans             int    `json:"spans"`       // summarizer calls the fold needed; 1 unless it was split
-	ProjectionTokens  int    `json:"projection_tokens"`
-	UserTurnsKept     int    `json:"user_turns_kept"`
-	UserTurnsDropped  int    `json:"user_turns_dropped"` // past the retention budget, now summary-only
-	InputTokens       int    `json:"input_tokens"`
-	OutputTokens      int    `json:"output_tokens"`
-	CacheHitTokens    int    `json:"cache_hit_tokens"`
-	CacheMissTokens   int    `json:"cache_miss_tokens"`
-	CacheWriteTokens  int    `json:"cache_write_tokens"`
-	RequestCount      int    `json:"request_count"`
-	ProviderRequestID string `json:"provider_request_id,omitempty"`
-	SummaryInputMode  string `json:"summary_input_mode,omitempty"`
-	Error             string `json:"error,omitempty"`
+	Trigger              string `json:"trigger"`
+	CacheState           string `json:"cache_state"`
+	Mode                 string `json:"mode"`
+	Native               bool   `json:"native"`
+	SourceTokens         int    `json:"source_tokens"`
+	FoldTokens           int    `json:"fold_tokens"` // summarizer input after any shortening
+	Spans                int    `json:"spans"`       // summarizer calls the fold needed; 1 unless it was split
+	ProjectionTokens     int    `json:"projection_tokens"`
+	UserTurnsKept        int    `json:"user_turns_kept"`
+	UserTurnsDropped     int    `json:"user_turns_dropped"` // past the retention budget, now summary-only
+	InputTokens          int    `json:"input_tokens"`
+	OutputTokens         int    `json:"output_tokens"`
+	CacheHitTokens       int    `json:"cache_hit_tokens"`
+	CacheMissTokens      int    `json:"cache_miss_tokens"`
+	CacheWriteTokens     int    `json:"cache_write_tokens"`
+	RequestCount         int    `json:"request_count"`
+	ProviderRequestID    string `json:"provider_request_id,omitempty"`
+	SummaryInputMode     string `json:"summary_input_mode,omitempty"`
+	MaintenanceMode      string `json:"maintenance_mode,omitempty"`
+	FoldUnits            int    `json:"fold_units,omitempty"`
+	CoveredCanonicalFrom int    `json:"covered_canonical_from,omitempty"`
+	CoveredCanonicalTo   int    `json:"covered_canonical_to,omitempty"`
+	ProjectionGeneration uint64 `json:"projection_generation,omitempty"`
+	CacheGeneration      uint64 `json:"cache_generation,omitempty"`
+	BreaksPromptCache    bool   `json:"breaks_prompt_cache,omitempty"`
+	SummaryLatencyMS     int64  `json:"summary_latency_ms,omitempty"`
+	ProviderWindowSource string `json:"provider_window_source,omitempty"`
+	IrreducibleReason    string `json:"irreducible_reason,omitempty"`
+	Error                string `json:"error,omitempty"`
 }
 
 // ContextStatePath returns the projection sidecar path for a session transcript.
@@ -184,11 +230,15 @@ func LoadCompactionState(sessionPath string) (CompactionState, bool, error) {
 	if err := json.Unmarshal(b, &st); err != nil {
 		return CompactionState{}, false, fmt.Errorf("decode context state %s: %w", path, err)
 	}
-	if st.SchemaVersion != 0 && st.SchemaVersion != compactionStateSchemaV1 && st.SchemaVersion != compactionStateSchemaV2 && st.SchemaVersion != compactionStateSchemaV3 {
+	if st.SchemaVersion != 0 && st.SchemaVersion != compactionStateSchemaV1 && st.SchemaVersion != compactionStateSchemaV2 && st.SchemaVersion != compactionStateSchemaV3 && st.SchemaVersion != compactionStateSchemaV4 && st.SchemaVersion != compactionStateSchemaV5 {
 		return CompactionState{}, false, fmt.Errorf("unsupported context schema version %d", st.SchemaVersion)
 	}
 	if st.SchemaVersion == 0 {
 		st.SchemaVersion = compactionStateSchemaV1
+	}
+	upgradeLegacyProjectionMetadata(&st)
+	if st.ProjectionGeneration == 0 && st.Projection.ProjectionVersion > 0 {
+		st.ProjectionGeneration = st.Projection.ProjectionVersion
 	}
 	return st, true, nil
 }
@@ -502,10 +552,14 @@ func projectionContentValid(st CompactionState, msgs []provider.Message) bool {
 // modelVisibleFromProjection splices the projection with any messages appended
 // after it was built. LocalOnly messages stay excluded via ModelMessages later.
 func modelVisibleFromProjection(proj ContextProjection, canonical []provider.Message) []provider.Message {
-	if len(proj.Messages) == 0 {
+	body := proj.Messages
+	if len(proj.Items) > 0 {
+		body = renderProjection(proj.Items, ProviderCapabilities{})
+	}
+	if len(body) == 0 {
 		return nil
 	}
-	out := append([]provider.Message(nil), proj.Messages...)
+	out := append([]provider.Message(nil), body...)
 	if proj.CoveredCount >= 0 && proj.CoveredCount < len(canonical) {
 		out = append(out, canonical[proj.CoveredCount:]...)
 	}
@@ -549,7 +603,8 @@ func coalesceProjectionUserRuns(msgs []provider.Message) []provider.Message {
 // formatSummaryMessage builds the stable user-turn wrapper around a digest.
 func formatSummaryMessage(summary string) provider.Message {
 	return provider.Message{
-		Role: provider.RoleUser,
+		Role:           provider.RoleUser,
+		ProjectionKind: projectionKindHistoryCheckpoint,
 		Content: summaryTagOpen + "\n" +
 			"Summary of earlier conversation (older messages were compacted to save context):\n" +
 			summary + "\n" +

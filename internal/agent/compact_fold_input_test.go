@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -25,10 +26,35 @@ type deadlineInspectProvider struct {
 
 type summaryChunksProvider struct {
 	chunks []provider.Chunk
+	calls  int
+}
+
+type observedSummaryLimitProvider struct {
+	requests []provider.Request
+}
+
+func (p *observedSummaryLimitProvider) Name() string { return "observed-summary-limit" }
+func (p *observedSummaryLimitProvider) Stream(_ context.Context, req provider.Request) (<-chan provider.Chunk, error) {
+	p.requests = append(p.requests, req)
+	ch := make(chan provider.Chunk, 2)
+	if req.MaxTokens <= 1310 {
+		ch <- provider.Chunk{Type: provider.ChunkText, Text: "partial checkpoint"}
+		ch <- provider.Chunk{Type: provider.ChunkUsage, Usage: &provider.Usage{
+			CompletionTokens: req.MaxTokens, FinishReason: "length",
+		}}
+	} else {
+		ch <- provider.Chunk{Type: provider.ChunkText, Text: "complete checkpoint"}
+		ch <- provider.Chunk{Type: provider.ChunkUsage, Usage: &provider.Usage{
+			CompletionTokens: 128, FinishReason: "stop",
+		}}
+	}
+	close(ch)
+	return ch, nil
 }
 
 func (p *summaryChunksProvider) Name() string { return "summary-chunks" }
 func (p *summaryChunksProvider) Stream(context.Context, provider.Request) (<-chan provider.Chunk, error) {
+	p.calls++
 	ch := make(chan provider.Chunk, len(p.chunks))
 	for _, chunk := range p.chunks {
 		ch <- chunk
@@ -104,6 +130,58 @@ func TestSummaryCollectorRejectsEmptyAndLengthLimitedOutput(t *testing.T) {
 				t.Fatalf("summarize error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestSummaryCollectorRejectsIncompleteTerminal(t *testing.T) {
+	for _, reason := range []string{"incomplete", "content_filter", "repetition_truncation"} {
+		t.Run(reason, func(t *testing.T) {
+			prov := &summaryChunksProvider{chunks: []provider.Chunk{
+				{Type: provider.ChunkText, Text: "partial checkpoint"},
+				{Type: provider.ChunkUsage, Usage: &provider.Usage{FinishReason: reason}},
+				{Type: provider.ChunkDone},
+			}}
+			a := New(prov, tool.NewRegistry(), NewSession("system"), Options{}, event.Discard)
+
+			_, _, err := a.summarize(context.Background(), []provider.Message{{Role: provider.RoleUser, Content: "old"}}, "")
+			var rejected *CompletionRejectedError
+			if !errors.As(err, &rejected) {
+				t.Fatalf("summarize error = %v, want CompletionRejectedError", err)
+			}
+			if !errors.Is(err, errSummaryOutputTruncated) {
+				t.Fatalf("summarize error = %v, want errSummaryOutputTruncated", err)
+			}
+			if rejected.FinishReason != reason {
+				t.Fatalf("finish reason = %q, want %s", rejected.FinishReason, reason)
+			}
+			if prov.calls != 1 {
+				t.Fatalf("summary provider calls = %d, want 1", prov.calls)
+			}
+		})
+	}
+}
+
+func TestActiveCheckpointSummaryRecoversFromObserved1310TokenTruncation(t *testing.T) {
+	prov := &observedSummaryLimitProvider{}
+	a := New(prov, tool.NewRegistry(), NewSession("system"), Options{
+		ContextWindow:   65_536,
+		MaxOutputTokens: 4096,
+	}, event.Discard)
+
+	got, _, err := a.summarizeForPurpose(context.Background(), []provider.Message{{
+		Role: provider.RoleUser, Content: strings.Repeat("completed active-turn work. ", 200),
+	}}, "", summaryPurposeActiveCheckpoint)
+	if err != nil {
+		t.Fatalf("active checkpoint summary failed at the observed provider limit: %v", err)
+	}
+	if got != "complete checkpoint" {
+		t.Fatalf("summary = %q, want complete checkpoint", got)
+	}
+	if len(prov.requests) == 0 {
+		t.Fatal("summarizer was not called")
+	}
+	if maxTokens := prov.requests[len(prov.requests)-1].MaxTokens; maxTokens <= 1310 {
+		t.Fatalf("final summary output budget = %d, want above observed truncation ceiling 1310", maxTokens)
 	}
 }
 

@@ -17,10 +17,10 @@ func retentionSession(midTurn string) *Session {
 	return &Session{Messages: []provider.Message{
 		{Role: provider.RoleSystem, Content: "sys"},
 		{Role: provider.RoleUser, Content: "first task"},
-		{Role: provider.RoleAssistant, Content: big},
+		{Role: provider.RoleAssistant, Content: big, ToolCalls: []provider.ToolCall{{ID: "1", Name: "read_file", Arguments: `{}`}}},
 		{Role: provider.RoleTool, ToolCallID: "1", Name: "read_file", Content: big},
 		{Role: provider.RoleUser, Content: midTurn},
-		{Role: provider.RoleAssistant, Content: big},
+		{Role: provider.RoleAssistant, Content: big, ToolCalls: []provider.ToolCall{{ID: "2", Name: "read_file", Arguments: `{}`}}},
 		{Role: provider.RoleTool, ToolCallID: "2", Name: "read_file", Content: big},
 		{Role: provider.RoleUser, Content: "next"},
 		{Role: provider.RoleAssistant, Content: "ok"},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -23,9 +24,9 @@ func (t overflowLoopTool) Execute(context.Context, json.RawMessage) (string, err
 	return t.output, nil
 }
 
-// repeatedOverflowProvider forces two independent context-limit recoveries in
-// one Run. Summary requests are answered separately and never advance the tool
-// loop, so the test exercises the production recovery/compaction wiring.
+// repeatedOverflowProvider forces independent context-limit recoveries every
+// third tool call. Summary requests never advance the tool loop, so the test
+// exercises the production recovery/compaction wiring.
 type repeatedOverflowProvider struct {
 	mu           sync.Mutex
 	toolCalls    int
@@ -59,7 +60,7 @@ func (p *repeatedOverflowProvider) Stream(_ context.Context, req provider.Reques
 	}
 	p.requestsAt[p.toolCalls]++
 
-	if (p.toolCalls == 3 || p.toolCalls == 6) && !p.rejectedAt[p.toolCalls] {
+	if p.toolCalls > 0 && p.toolCalls%3 == 0 && !p.rejectedAt[p.toolCalls] {
 		p.rejectedAt[p.toolCalls] = true
 		p.overflows++
 		return nil, &provider.ContextLimitError{
@@ -97,15 +98,31 @@ func chunks(items ...provider.Chunk) <-chan provider.Chunk {
 }
 
 func TestToolLoopRetriesOnlyAfterOverflowMaintenanceProgress(t *testing.T) {
-	prov := &repeatedOverflowProvider{rejectedAt: make(map[int]bool), requestsAt: make(map[int]int), maxToolCalls: 9}
+	testRepeatedOverflowRecovery(t, 2)
+}
+
+func TestActiveCheckpointRecoversFiveOverflows(t *testing.T) {
+	testRepeatedOverflowRecovery(t, 5)
+}
+
+func testRepeatedOverflowRecovery(t *testing.T, overflowCount int) {
+	t.Helper()
+	prov := &repeatedOverflowProvider{
+		rejectedAt: make(map[int]bool), requestsAt: make(map[int]int), maxToolCalls: overflowCount * 3,
+	}
 	reg := tool.NewRegistry()
 	reg.Add(overflowLoopTool{output: strings.Repeat("large deterministic tool output. ", 700)})
 
 	applied := 0
+	var projectionGenerations, cacheGenerations []uint64
+	var maintenanceModes []string
 	sink := event.FuncSink(func(e event.Event) {
 		if e.Kind == event.ContextMaintenanceEvent && e.Maintenance != nil &&
 			e.Maintenance.Status == "applied" && e.Maintenance.Action == "summary" {
 			applied++
+			projectionGenerations = append(projectionGenerations, e.Maintenance.ProjectionGeneration)
+			cacheGenerations = append(cacheGenerations, e.Maintenance.CacheGeneration)
+			maintenanceModes = append(maintenanceModes, e.Maintenance.Mode)
 		}
 	})
 	a := New(prov, reg, NewSession("system"), Options{
@@ -115,19 +132,51 @@ func TestToolLoopRetriesOnlyAfterOverflowMaintenanceProgress(t *testing.T) {
 	}, sink)
 
 	err := a.Run(context.Background(), "keep using the tool until the provider says the task is done")
-	if err == nil {
-		t.Fatal("overflow without new projection progress unexpectedly retried")
+	if err != nil {
+		prov.mu.Lock()
+		overflows, toolCalls, summaries := prov.overflows, prov.toolCalls, prov.summaries
+		prov.mu.Unlock()
+		projection := a.sess.compactionState.Projection
+		t.Fatalf("rolling checkpoint recovery after %d overflows, %d tool calls, %d summaries: %v; version=%d covered=%d",
+			overflows, toolCalls, summaries, err, projection.ProjectionVersion, projection.CoveredCount)
 	}
 
 	prov.mu.Lock()
 	defer prov.mu.Unlock()
-	if prov.overflows != 2 {
-		t.Fatalf("provider overflows = %d, want 2", prov.overflows)
+	if prov.overflows != overflowCount {
+		t.Fatalf("provider overflows = %d, want %d", prov.overflows, overflowCount)
 	}
-	if prov.requestsAt[3] != 2 || prov.requestsAt[6] != 1 {
-		t.Fatalf("requests at overflow points = %v, want one retry after progress and none without progress", prov.requestsAt)
+	for overflow := 1; overflow <= overflowCount; overflow++ {
+		if point := overflow * 3; prov.requestsAt[point] != 2 {
+			t.Fatalf("requests at overflow points = %v, want two at %d", prov.requestsAt, point)
+		}
 	}
-	if prov.summaries > 1 || applied > 1 {
-		t.Fatalf("summaries=%d applied=%d, want no repeated summary without new projection input", prov.summaries, applied)
+	if applied < overflowCount || prov.summaries > applied {
+		t.Fatalf("summaries=%d applied=%d, want at least one progressing checkpoint per overflow", prov.summaries, applied)
 	}
+	if overflowCount >= 5 && prov.summaries >= applied {
+		t.Fatalf("five-overflow replay never exercised no-call mechanical fallback: summaries=%d applied=%d", prov.summaries, applied)
+	}
+	if !strictlyIncreasing(projectionGenerations, applied) || !strictlyIncreasing(cacheGenerations, applied) {
+		t.Fatalf("projection/cache generations did not advance monotonically: %v/%v", projectionGenerations, cacheGenerations)
+	}
+	wantModes := make([]string, applied)
+	for i := range wantModes {
+		wantModes[i] = MaintenanceMechanicalFallback
+	}
+	if !reflect.DeepEqual(maintenanceModes, wantModes) {
+		t.Fatalf("maintenance modes = %v", maintenanceModes)
+	}
+}
+
+func strictlyIncreasing(values []uint64, want int) bool {
+	if len(values) != want {
+		return false
+	}
+	for i := 1; i < len(values); i++ {
+		if values[i] <= values[i-1] {
+			return false
+		}
+	}
+	return true
 }

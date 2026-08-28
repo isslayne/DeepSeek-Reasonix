@@ -5,21 +5,26 @@ import "reasonix/internal/provider"
 // ContextMaintenanceSnapshot is a read-only view of the current provider-bound
 // context. It separates present composition from cumulative summary-call cost.
 type ContextMaintenanceSnapshot struct {
-	CanonicalTokens   int
-	ProjectedTokens   int
-	SummaryTokens     int
-	LastSavedTokens   int
-	SnipTrigger       int
-	FoldTrigger       int
-	ForceTrigger      int
-	TriggerTokens     int
-	CheckpointState   string
-	HardInputCeiling  int
-	Headroom          int
-	ProjectionVersion uint64
-	Blocked           bool
-	LastReceipt       *ContextMaintenanceReceipt
-	ContextBudget     *ContextBudgetSnapshot
+	CanonicalTokens          int
+	ProjectedTokens          int
+	SummaryTokens            int
+	LastSavedTokens          int
+	SnipTrigger              int
+	FoldTrigger              int
+	ForceTrigger             int
+	TriggerTokens            int
+	CheckpointState          string
+	HardInputCeiling         int
+	Headroom                 int
+	ProjectionVersion        uint64
+	ProjectionGeneration     uint64
+	CacheGeneration          uint64
+	MaintenanceMode          string
+	IrreducibleReason        string
+	MaintenanceRearmAtTokens int
+	Blocked                  bool
+	LastReceipt              *ContextMaintenanceReceipt
+	ContextBudget            *ContextBudgetSnapshot
 }
 
 // ContextBudgetSnapshot is the optional send-time admission view for the
@@ -67,13 +72,16 @@ func (a *Agent) ContextMaintenanceSnapshot() ContextMaintenanceSnapshot {
 		uiCheckpoint = stateCheckpointState(checkpointState, state)
 	}
 	snapshot := ContextMaintenanceSnapshot{
-		CanonicalTokens:   a.estimatedVisibleRequestTokens(canonical),
-		ProjectedTokens:   a.estimatedVisibleRequestTokens(visible),
-		FoldTrigger:       trigger,
-		TriggerTokens:     trigger,
-		CheckpointState:   uiCheckpoint,
-		HardInputCeiling:  a.hardInputCeiling(),
-		ProjectionVersion: state.Projection.ProjectionVersion,
+		CanonicalTokens:          a.estimatedVisibleRequestTokens(canonical),
+		ProjectedTokens:          a.estimatedVisibleRequestTokens(visible),
+		FoldTrigger:              trigger,
+		TriggerTokens:            trigger,
+		CheckpointState:          uiCheckpoint,
+		HardInputCeiling:         a.hardInputCeiling(),
+		ProjectionVersion:        state.Projection.ProjectionVersion,
+		ProjectionGeneration:     state.ProjectionGeneration,
+		CacheGeneration:          state.CacheGeneration,
+		MaintenanceRearmAtTokens: state.MaintenanceRearmAtTokens,
 	}
 	for _, msg := range visible {
 		if isCompactionSummary(msg) {
@@ -85,6 +93,8 @@ func (a *Agent) ContextMaintenanceSnapshot() ContextMaintenanceSnapshot {
 	if state.LastReceipt != nil {
 		receipt := *state.LastReceipt
 		snapshot.LastReceipt = &receipt
+		snapshot.MaintenanceMode = receipt.Mode
+		snapshot.IrreducibleReason = receipt.IrreducibleReason
 		if receipt.Status == "applied" && (receipt.Action == "prune" || receipt.Action == "summary") {
 			snapshot.LastSavedTokens = receipt.SavedTokens
 		}

@@ -167,12 +167,15 @@ func TestCompactionPausesWhenWindowTooSmall(t *testing.T) {
 	// content cannot form a safe checkpoint. It must not start many summaries.
 	_ = a.Run(context.Background(), "turn 0: keep going")
 	_ = a.Run(context.Background(), "turn 1: keep going")
-	if started > 2 {
-		t.Fatalf("summary transactions started = %d, want ≤2 (no multi-span / retry loop)", started)
+	// Rolling checkpoints may legitimately advance after each newly completed
+	// atomic tool group. The safety contract is bounded progress followed by a
+	// typed irreducible outcome, rather than the legacy two-summary ceiling.
+	if started > 15 {
+		t.Fatalf("summary transactions started = %d, want a bounded rolling sequence", started)
 	}
-	if blocked == 0 && a.currentProjectionVersion() == 0 {
-		// Either a durable block or a successful install is fine; looping is not.
-		t.Logf("started=%d blocked=%d version=%d", started, blocked, a.currentProjectionVersion())
+	if blocked == 0 || a.currentProjectionVersion() == 0 {
+		t.Fatalf("rolling maintenance did not both progress and terminate explicitly: started=%d blocked=%d version=%d",
+			started, blocked, a.currentProjectionVersion())
 	}
 }
 

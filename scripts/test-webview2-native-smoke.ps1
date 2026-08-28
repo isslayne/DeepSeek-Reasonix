@@ -192,6 +192,39 @@ function Remove-NativeSmokeDirectory {
     }
 }
 
+function Request-NativeSmokeGracefulClose {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Process,
+        [int]$TimeoutMilliseconds = 5000,
+        [int]$RetryMilliseconds = 100
+    )
+
+    if ($TimeoutMilliseconds -le 0 -or $RetryMilliseconds -le 0) {
+        throw "graceful-close timeout and retry interval must be positive"
+    }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        # System.Diagnostics.Process caches MainWindowHandle. A WebView2
+        # renderer/window handoff can make the first CloseMainWindow call see a
+        # stale handle even though the immediately preceding health sample was
+        # valid. Refresh and retry for a bounded interval without weakening the
+        # requirement that the production window accepts a graceful close.
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return $false
+        }
+        if ($Process.CloseMainWindow()) {
+            return $true
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            break
+        }
+        Start-Sleep -Milliseconds $RetryMilliseconds
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
 function New-NativeSmokeSelfTestState {
     param(
         [bool]$Exited = $false,
@@ -236,6 +269,24 @@ function Invoke-NativeSmokeStateMachineSelfTest {
     }
     $result = Update-NativeSmokeStability -Tracker @{ HealthySince = $null } -State (New-NativeSmokeSelfTestState -Exited $true) -Now $start -RequiredHealthySeconds 5
     Assert-NativeSmokeSelfTest ($result -eq "Exited") "process exit must remain terminal"
+
+    $closeMock = [pscustomobject]@{ HasExited = $false; CloseAttempts = 0; RefreshAttempts = 0 }
+    $closeMock | Add-Member -MemberType ScriptMethod -Name Refresh -Value { $this.RefreshAttempts++ }
+    $closeMock | Add-Member -MemberType ScriptMethod -Name CloseMainWindow -Value {
+        $this.CloseAttempts++
+        return $this.CloseAttempts -ge 2
+    }
+    $closeRequested = Request-NativeSmokeGracefulClose -Process $closeMock -TimeoutMilliseconds 1000 -RetryMilliseconds 1
+    Assert-NativeSmokeSelfTest ($closeRequested -and $closeMock.CloseAttempts -eq 2 -and $closeMock.RefreshAttempts -eq 2) "graceful close must refresh and retry a transient rejected request"
+
+    $rejectCloseMock = [pscustomobject]@{ HasExited = $false; CloseAttempts = 0 }
+    $rejectCloseMock | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+    $rejectCloseMock | Add-Member -MemberType ScriptMethod -Name CloseMainWindow -Value {
+        $this.CloseAttempts++
+        return $false
+    }
+    $closeRequested = Request-NativeSmokeGracefulClose -Process $rejectCloseMock -TimeoutMilliseconds 10 -RetryMilliseconds 1
+    Assert-NativeSmokeSelfTest (-not $closeRequested -and $rejectCloseMock.CloseAttempts -gt 0) "graceful close must remain bounded when every request is rejected"
 
     $cleanupRoot = Join-Path ([IO.Path]::GetTempPath()) ("reasonix-native-smoke-cleanup-test-" + [guid]::NewGuid().ToString("N"))
     Remove-NativeSmokeDirectory -LiteralPath $cleanupRoot
@@ -321,8 +372,8 @@ try {
         throw "Reasonix did not keep its main window, WebView2 renderer, document, and composer healthy for $HealthySeconds consecutive seconds within $TimeoutSeconds seconds; last_state=$(Format-NativeSmokeState -State $lastState)"
     }
 
-    if (-not $process.CloseMainWindow()) {
-        throw "Reasonix main window rejected the graceful close request"
+    if (-not (Request-NativeSmokeGracefulClose -Process $process)) {
+        throw "Reasonix main window rejected the graceful close request for 5 seconds"
     }
     if (-not $process.WaitForExit(10000)) {
         throw "Reasonix did not exit within 10 seconds after the graceful close request"

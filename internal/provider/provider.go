@@ -105,6 +105,9 @@ type Message struct {
 	// understanding prepass. It is copied into provider-visible Content by the
 	// turn owner and stripped at the provider boundary.
 	VisionSummary *VisionSummary `json:"vision_summary,omitempty"`
+	// ProjectionKind/Synthetic are host-only context-sidecar metadata.
+	ProjectionKind string `json:"projection_kind,omitempty"`
+	Synthetic      bool   `json:"synthetic,omitempty"`
 }
 
 // VisionSummary is a bounded, provider-independent description of one user
@@ -217,13 +220,6 @@ type ToolCall struct {
 	ResolvedName     string `json:"resolved_name,omitempty"`
 	CapabilityID     string `json:"capability_id,omitempty"`
 	ResolvedReadOnly *bool  `json:"resolved_read_only,omitempty"`
-}
-
-// ToolSchema is a tool definition exposed to the model. Parameters is JSON Schema.
-type ToolSchema struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"`
 }
 
 // Request is a single completion request.

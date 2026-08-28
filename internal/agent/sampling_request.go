@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"reasonix/internal/event"
 	"reasonix/internal/provider"
@@ -65,6 +66,16 @@ func (a *Agent) handleSamplingError(
 	result, last streamedTurn,
 	billable *provider.Usage,
 ) (retry bool, terminal streamedTurn) {
+	if errors.Is(result.err, ErrCompletionRejected) {
+		// A non-committable response is terminal for this run, not a transport
+		// retry. Discard any buffered speculative events and close the
+		// attempt lifecycle before the outer loop records bounded LocalOnly
+		// diagnostics and returns the typed rejection.
+		streamSink.Discard()
+		a.emitStreamAttempt(attemptID, event.StreamAttemptDiscard, attempt, event.StreamAttemptReasonCompletionRejected, result.err)
+		last.usage = finalizeSamplingUsage(billable, result.usage)
+		return false, last
+	}
 	if provider.IsStreamInterrupted(result.err) && attempt < maxSamplingAttempts {
 		streamSink.Discard()
 		reason := provider.StreamInterruptReason(result.err)
@@ -95,15 +106,40 @@ func (a *Agent) prepareSamplingRequest(ctx context.Context) (samplingRequest, er
 	}
 	if err := a.applyAdmissionToRequest(&frozen.req); err != nil {
 		// One-shot physical overflow recovery. Do not loop.
-		startProjectionVersion := a.currentProjectionVersion()
+		before := a.maintenanceProgressSnapshot()
+		inputHash := a.contextMaintenanceInputHash(frozen.req.Messages)
+		if blocked, reason := a.contextMaintenanceBlocked(inputHash); blocked {
+			return samplingRequest{}, &IrreducibleContextError{
+				Reason: IrreducibleNoProjectionProgress, EffectiveWindow: a.effectiveContextWindow(),
+				EstimatedPrompt: a.estimatedRequestTokens(frozen.req), ProjectionGen: before.Generation,
+				InputHash: inputHash, Detail: "maintenance is already blocked for this active turn: " + reason,
+			}
+		}
+		key := MaintenanceAttemptKey{
+			InputHash: inputHash, ProjectionGen: before.Generation,
+			EffectiveWindow: a.effectiveContextWindow(), Trigger: CompactionTriggerOverflow,
+		}
+		if !a.registerMaintenanceAttempt(key) {
+			return samplingRequest{}, &IrreducibleContextError{
+				Reason: IrreducibleNoProjectionProgress, EffectiveWindow: key.EffectiveWindow,
+				EstimatedPrompt: a.estimatedRequestTokens(frozen.req), ProjectionGen: key.ProjectionGen,
+				InputHash: key.InputHash, Detail: "the same local-overflow maintenance attempt already ran",
+			}
+		}
 		if _, perr := a.contextManager().Prepare(ctx, ContextPreparePolicy{
 			Trigger: CompactionTriggerOverflow,
 			Force:   true,
 		}); perr != nil {
-			return samplingRequest{}, err
+			return samplingRequest{}, perr
 		}
-		if a.currentProjectionVersion() <= startProjectionVersion {
-			return samplingRequest{}, err
+		after := a.maintenanceProgressSnapshot()
+		failingHash := providerVisibleFingerprint(modelInputMessages(frozen.req.Messages))
+		if !maintenanceMadeProgress(before, after, failingHash) {
+			return samplingRequest{}, &IrreducibleContextError{
+				Reason: IrreducibleNoProjectionProgress, EffectiveWindow: key.EffectiveWindow,
+				EstimatedPrompt: a.estimatedRequestTokens(frozen.req), ProjectionGen: after.Generation,
+				InputHash: key.InputHash, Detail: "local overflow maintenance installed no smaller projection",
+			}
 		}
 		rebuilt, rerr := a.buildSamplingRequest(ctx, CompactionTriggerPressure)
 		if rerr != nil {

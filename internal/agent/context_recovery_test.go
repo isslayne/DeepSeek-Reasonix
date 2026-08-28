@@ -122,8 +122,8 @@ func TestContextLimitRecoveryChangesOnlyOutputField(t *testing.T) {
 	if !sameProviderRequestExceptMaxTokens(prov.reqs[0], prov.reqs[1]) {
 		t.Fatalf("provider request changed outside MaxTokens:\nfirst=%+v\nretry=%+v", prov.reqs[0], prov.reqs[1])
 	}
-	if prov.reqs[1].MaxTokens != 229_502 {
-		t.Fatalf("retry MaxTokens = %d, want 229502", prov.reqs[1].MaxTokens)
+	if prov.reqs[1].MaxTokens != 236_670 {
+		t.Fatalf("retry MaxTokens = %d, want 236670", prov.reqs[1].MaxTokens)
 	}
 	if a.lastAdmission().LastRecovery != contextRecoveryLearnedRetry {
 		t.Fatalf("last recovery = %s", a.lastAdmission().LastRecovery)
@@ -135,8 +135,8 @@ func TestContextLimitRecoveryChangesOnlyOutputField(t *testing.T) {
 	if budget.Source != provider.ContextBudgetSourceLearned || budget.WindowMode != provider.ContextWindowShared.String() {
 		t.Fatalf("retry source/window = %s/%s, want learned/shared", budget.Source, budget.WindowMode)
 	}
-	if budget.RequestedOutputTokens != 384_000 || budget.EffectiveOutputTokens != 229_502 || budget.PhysicalRemaining != 229_502 || !budget.Clipped {
-		t.Fatalf("retry budget = %+v, want requested=384000 effective=physical=229502 clipped", budget)
+	if budget.RequestedOutputTokens != 384_000 || budget.EffectiveOutputTokens != 236_670 || budget.PhysicalRemaining != 236_670 || !budget.Clipped {
+		t.Fatalf("retry budget = %+v, want requested=384000 effective=physical=236670 clipped", budget)
 	}
 	if budget.ObservedWindow != 1_048_576 || budget.ObservedPrompt != 810_882 || budget.ObservedCompletion != 354_469 {
 		t.Fatalf("retry observations = %+v", budget)
@@ -164,8 +164,8 @@ func TestContextLimitRecoveryPublishesUnknownGatewayBudget(t *testing.T) {
 		t.Fatalf("unknown gateway recovery failed: %v", got.err)
 	}
 	prov.mu.Lock()
-	if len(prov.reqs) != 2 || prov.reqs[0].MaxTokens != 0 || prov.reqs[1].MaxTokens != 1_808 {
-		t.Fatalf("unknown gateway requests = %+v, want omitted then 1808", prov.reqs)
+	if len(prov.reqs) != 2 || prov.reqs[0].MaxTokens != 0 || prov.reqs[1].MaxTokens != 9_744 {
+		t.Fatalf("unknown gateway requests = %+v, want omitted then 9744", prov.reqs)
 	}
 	prov.mu.Unlock()
 	budget := a.ContextMaintenanceSnapshot().ContextBudget
@@ -174,7 +174,7 @@ func TestContextLimitRecoveryPublishesUnknownGatewayBudget(t *testing.T) {
 	}
 	if budget.Source != provider.ContextBudgetSourceLearned || budget.WindowMode != provider.ContextWindowShared.String() ||
 		budget.AutoOutputTokens != 15_000 || budget.RequestedOutputTokens != 15_000 ||
-		budget.EffectiveOutputTokens != 1_808 || budget.PhysicalRemaining != 1_808 || !budget.Clipped ||
+		budget.EffectiveOutputTokens != 9_744 || budget.PhysicalRemaining != 9_744 || !budget.Clipped ||
 		budget.LastRecovery != contextRecoveryLearnedRetry {
 		t.Fatalf("unknown gateway retry budget = %+v", budget)
 	}

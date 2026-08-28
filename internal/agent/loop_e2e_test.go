@@ -560,8 +560,11 @@ func TestRunRecoveryKeepsCompletedToolPairAndSummarizesChangedFile(t *testing.T)
 // cleanly (the repair is a no-op on well-formed histories).
 func TestRunWellFormedToolLoopRoundTrips(t *testing.T) {
 	mp := testutil.NewMock("m",
-		testutil.Turn{ToolCalls: []provider.ToolCall{{ID: "c1", Name: "echo", Arguments: `{"text":"hi"}`}}},
-		testutil.Turn{Text: "all set"},
+		testutil.Turn{
+			ToolCalls: []provider.ToolCall{{ID: "c1", Name: "echo", Arguments: `{"text":"hi"}`}},
+			Usage:     &provider.Usage{FinishReason: "tool_calls"},
+		},
+		testutil.Turn{Text: "all set", Usage: &provider.Usage{FinishReason: "stop"}},
 	)
 	a := New(mp, echoRegistry(), NewSession(""), Options{}, event.Discard)
 	if err := a.Run(withNoClosedLoop(context.Background()), "go"); err != nil {

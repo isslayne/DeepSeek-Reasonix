@@ -68,7 +68,8 @@ func TestWindowsWebView2SmokeUsesExternalProductionBinaryContract(t *testing.T) 
 		`Update-NativeSmokeStability`,
 		`a transient renderer handoff must reset without failing`,
 		`$HealthySeconds consecutive seconds`,
-		`$process.CloseMainWindow()`,
+		`Request-NativeSmokeGracefulClose`,
+		`graceful close must refresh and retry a transient rejected request`,
 		`$process.WaitForExit(10000)`,
 		`taskkill.exe /PID $process.Id /T /F`,
 	} {
@@ -82,6 +83,7 @@ func TestWindowsWebView2SmokeUsesExternalProductionBinaryContract(t *testing.T) 
 		"Element.prototype.animate",
 		"WebView2ApprovalSmokeBridge",
 		"Reasonix lost its main window or WebView2 renderer during the health window",
+		`if (-not $process.CloseMainWindow())`,
 	} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("Windows WebView2 smoke still contains production instrumentation %q", forbidden)

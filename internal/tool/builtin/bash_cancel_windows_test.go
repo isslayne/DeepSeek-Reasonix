@@ -17,6 +17,11 @@ import (
 	"reasonix/internal/sandbox"
 )
 
+type windowsBashRunResult struct {
+	out string
+	err error
+}
+
 func TestBashCancelKillsWindowsChildProcessTree(t *testing.T) {
 	powershell, err := exec.LookPath("powershell")
 	if err != nil {
@@ -35,18 +40,19 @@ func TestBashCancelKillsWindowsChildProcessTree(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	done := make(chan error, 1)
+	done := make(chan windowsBashRunResult, 1)
 	go func() {
-		_, runErr := (bash{
+		out, runErr := (bash{
 			shell: sandbox.Shell{Kind: sandbox.ShellPowerShell, Path: powershell},
 		}).Execute(ctx, args)
-		done <- runErr
+		done <- windowsBashRunResult{out: out, err: runErr}
 	}()
 
-	childPID := waitForWindowsPIDFile(t, pidFile)
+	childPID := waitForWindowsPIDFile(t, pidFile, done)
 	cancel()
 	select {
-	case err = <-done:
+	case result := <-done:
+		err = result.err
 	case <-time.After(40 * time.Second):
 		killWindowsPID(childPID)
 		t.Fatal("cancel did not interrupt bash within 40s")
@@ -82,7 +88,7 @@ func TestBashWindowsReapsChildAfterForegroundShellExit(t *testing.T) {
 	out, err := (bash{
 		shell: sandbox.Shell{Kind: sandbox.ShellPowerShell, Path: powershell},
 	}).Execute(context.Background(), args)
-	childPID := waitForWindowsPIDFile(t, pidFile)
+	childPID := waitForWindowsPIDFile(t, pidFile, nil)
 	if err != nil {
 		killWindowsPID(childPID)
 		t.Fatalf("foreground command failed: %v (out=%q)", err, out)
@@ -111,18 +117,18 @@ func TestBashCancelKillsGitBashHereDocPython(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	done := make(chan error, 1)
+	done := make(chan windowsBashRunResult, 1)
 	go func() {
-		_, runErr := (bash{shell: sh}).Execute(ctx, args)
-		done <- runErr
+		out, runErr := (bash{shell: sh}).Execute(ctx, args)
+		done <- windowsBashRunResult{out: out, err: runErr}
 	}()
 
-	childPID := waitForWindowsPIDFile(t, pidFile)
+	childPID := waitForWindowsPIDFile(t, pidFile, done)
 	time.Sleep(300 * time.Millisecond) // let the tracker observe the Git Bash child tree.
 	cancel()
 	select {
-	case err := <-done:
-		if err == nil {
+	case result := <-done:
+		if result.err == nil {
 			t.Fatal("expected cancel to return an error")
 		}
 	case <-time.After(20 * time.Second):
@@ -139,10 +145,14 @@ func TestBashCancelKillsGitBashHereDocPython(t *testing.T) {
 	t.Fatalf("Git Bash here-doc python process %d survived bash cancel", childPID)
 }
 
-func waitForWindowsPIDFile(t *testing.T, path string) int {
+func waitForWindowsPIDFile(t *testing.T, path string, done chan windowsBashRunResult) int {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	const startupTimeout = 30 * time.Second
+	deadline := time.NewTimer(startupTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
@@ -150,10 +160,25 @@ func waitForWindowsPIDFile(t *testing.T, path string) int {
 				return pid
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case result := <-done:
+			// The shell can finish just before this select while its final write
+			// becomes visible. Check once more and preserve output so CI can
+			// distinguish a launch failure from a slow hosted runner.
+			data, readErr := os.ReadFile(path)
+			if readErr == nil {
+				pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+				if parseErr == nil && pid > 0 {
+					done <- result
+					return pid
+				}
+			}
+			t.Fatalf("bash exited before writing child pid file %s: err=%v out=%q", path, result.err, result.out)
+		case <-deadline.C:
+			t.Fatalf("timed out after %s waiting for child pid file %s", startupTimeout, path)
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("timed out waiting for child pid file %s", path)
-	return 0
 }
 
 func gitBashPython(t *testing.T, bashPath string) string {

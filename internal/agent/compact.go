@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -18,13 +19,16 @@ import (
 // until compactRatio of the window is crossed, then pressure-time tool pruning
 // and up to two cache-aligned summary checkpoints restore headroom.
 const (
-	defaultCompactRatio    = 0.80 // sole automatic maintenance trigger (new configs)
-	recentTailBudgetRatio  = 0.16 // recent verbatim tail as a fraction of the window
-	summaryOutputMaxTokens = 8192 // max digest output; further clipped by remaining candidate space
-	minRecentKeep          = 2    // never keep fewer recent messages than this
-	minCompactMessages     = 2    // skip compaction below this many compactable messages
-	fallbackTokPerChar     = 0.25 // ~4 chars/token, used before any usage is available to calibrate
-	protocolReserveTokens  = 256  // provider framing and control fields not represented by message estimates
+	defaultCompactRatio        = 0.80 // sole automatic maintenance trigger (new configs)
+	recentTailBudgetRatio      = 0.16 // recent verbatim tail as a fraction of the window
+	maintenanceTargetRatio     = 0.65 // reset point after crossing the 80% trigger
+	maintenanceRearmRatio      = 0.05 // minimum desired new work before another checkpoint
+	summaryOutputMaxTokens     = 8192 // max digest output; further clipped by remaining candidate space
+	activeTurnSummaryMaxTokens = 2048 // bounded emergency checkpoint output; ordinary summaries keep 8K
+	minRecentKeep              = 2    // never keep fewer recent messages than this
+	minCompactMessages         = 2    // skip compaction below this many compactable messages
+	fallbackTokPerChar         = 0.25 // ~4 chars/token, used before any usage is available to calibrate
+	protocolReserveTokens      = 256  // provider framing and control fields not represented by message estimates
 )
 
 var (
@@ -87,6 +91,22 @@ func (a *Agent) compactTrigger() int {
 	return max(1, int(float64(window)*ratio))
 }
 
+func (a *Agent) maintenanceTarget() int {
+	window := a.effectiveContextWindow()
+	if a == nil || window <= 0 {
+		return 0
+	}
+	return max(1, int(float64(window)*maintenanceTargetRatio))
+}
+
+func (a *Agent) maintenanceRearmDelta() int {
+	window := a.effectiveContextWindow()
+	if a == nil || window <= 0 {
+		return 0
+	}
+	return max(1, int(float64(window)*maintenanceRearmRatio))
+}
+
 // hardInputCeiling is a physical input-safety boundary, not another user
 // compaction threshold. Reply budgets are resolved independently at send time.
 func (a *Agent) hardInputCeiling() int {
@@ -94,7 +114,7 @@ func (a *Agent) hardInputCeiling() int {
 	if a == nil || window <= 0 {
 		return 0
 	}
-	return max(1, window-protocolReserveTokens)
+	return max(1, window-protocolMarginForWindow(window))
 }
 
 // recentTailBudget is the content-construction budget for the recent verbatim
@@ -235,8 +255,7 @@ func (a *Agent) activeTurnStart(msgs []provider.Message) int {
 
 // isCompactionSummary reports whether m is a rolling summary from a prior fold.
 func isCompactionSummary(m provider.Message) bool {
-	return m.Role == provider.RoleUser &&
-		strings.HasPrefix(strings.TrimLeft(m.Content, "\n "), summaryTagOpen)
+	return m.ProjectionKind == projectionKindHistoryCheckpoint
 }
 
 // pinnedPrefixLen keeps only the system message. All older user turns,
@@ -259,26 +278,30 @@ func (a *Agent) planCompaction(msgs []provider.Message, min int, force bool) (he
 				budget = half
 			}
 		}
-		start = tailStart(msgs, head, budget, a.tokPerChar(), a.tailFloor())
+		start = tailStartWithOptions(msgs, head, budget, a.tokPerChar(), a.tailFloor(), a.contextUnitBuildOptions())
 		// Remeasure when force or non-strict roles; strict-alternating otherwise
 		// keeps a cheap tokPerChar overestimate of the tail under force.
 		floor := max(head, len(msgs)-a.tailFloor())
 		remeasure := force || !a.strictAlternatingRoles
+		units := a.contextUnits(msgs)
 		for remeasure && start < floor && estimateMessagesTokens(provider.ModelMessages(msgs[start:])) > budget {
-			start++
-			for start < floor && start < len(msgs) && msgs[start].Role == provider.RoleTool {
-				start++
+			next := nextContextUnitBoundary(units, start)
+			if next <= start {
+				break
 			}
+			start = next
 		}
 	} else {
 		// No window: keep a fixed recent count, aligned off tool results.
 		start = len(msgs) - a.tailFloor()
-		for start > head && start < len(msgs) && msgs[start].Role == provider.RoleTool {
-			start--
-		}
+		start = previousContextUnitBoundary(a.contextUnits(msgs), start, head)
 	}
 	start = max(start, head)
 	if start-head < min {
+		return head, start, false
+	}
+	selected, aligned := contextUnitsInRange(a.contextUnits(msgs), head, start)
+	if !aligned || !contextUnitsFoldable(selected) {
 		return head, start, false
 	}
 	return head, start, true
@@ -294,23 +317,50 @@ func (a *Agent) tailFloor() int {
 // tail never begins with an orphan whose assistant tool_calls were summarized
 // away.
 func tailStart(msgs []provider.Message, head, budgetTokens int, tokPerChar float64, minKeep int) int {
+	return tailStartWithOptions(msgs, head, budgetTokens, tokPerChar, minKeep, contextUnitBuildOptions{})
+}
+
+func tailStartWithOptions(msgs []provider.Message, head, budgetTokens int, tokPerChar float64, minKeep int, options contextUnitBuildOptions) int {
+	units := buildContextUnits(msgs, options)
 	start := len(msgs)
 	acc := 0
-	for i := len(msgs) - 1; i > head; i-- {
-		c := int(float64(msgChars(msgs[i])) * tokPerChar)
-		if len(msgs)-i > minKeep && acc+c > budgetTokens {
+	for _, unit := range slices.Backward(units) {
+		if unit.VisibleStart <= head {
+			break
+		}
+		c := int(float64(charsOfMessages(unit.Messages)) * tokPerChar)
+		// The newest unit is always retained. It may contain more messages than
+		// minKeep (for example assistant tool_calls plus parallel results), but
+		// atomicity takes precedence over the raw message floor.
+		if start < len(msgs) && len(msgs)-unit.VisibleStart > minKeep && acc+c > budgetTokens {
 			break
 		}
 		acc += c
-		start = i
-	}
-	// start == len(msgs) when nothing fit the tail (a session too small to have a
-	// message after head); there is no msgs[start] to align off, and the caller's
-	// minCompactMessages check then no-ops the pass.
-	for start > head && start < len(msgs) && msgs[start].Role == provider.RoleTool {
-		start--
+		start = unit.VisibleStart
 	}
 	return start
+}
+
+func nextContextUnitBoundary(units []ContextUnit, boundary int) int {
+	for _, unit := range units {
+		if unit.VisibleStart >= boundary {
+			return unit.VisibleEnd
+		}
+	}
+	return boundary
+}
+
+func previousContextUnitBoundary(units []ContextUnit, boundary, floor int) int {
+	best := floor
+	for _, unit := range units {
+		if unit.VisibleEnd > boundary {
+			break
+		}
+		if unit.VisibleEnd > best {
+			best = unit.VisibleEnd
+		}
+	}
+	return best
 }
 
 // tokPerChar derives a tokens-per-character ratio from the last turn's real
@@ -360,10 +410,21 @@ func compactionInstructionWithFocus(instructions string) string {
 	return instruction
 }
 
+type summaryPurpose uint8
+
+const (
+	summaryPurposeHistory summaryPurpose = iota
+	summaryPurposeActiveCheckpoint
+)
+
 // summaryRequest builds the exact cache-aligned request shape used by
 // summarize. Keeping planning and execution on this shared builder prevents a
 // supposedly safe overflow fold from being rejected only after it is selected.
 func (a *Agent) summaryRequest(region []provider.Message, instructions string) provider.Request {
+	return a.summaryRequestForPurpose(region, instructions, summaryPurposeHistory)
+}
+
+func (a *Agent) summaryRequestForPurpose(region []provider.Message, instructions string, purpose summaryPurpose) provider.Request {
 	prefix := append([]provider.Message(nil), region...)
 	if len(prefix) == 0 || prefix[0].Role != provider.RoleSystem {
 		visible := a.modelVisibleMessages()
@@ -373,22 +434,61 @@ func (a *Agent) summaryRequest(region []provider.Message, instructions string) p
 	}
 	messages := a.normalizeModelRequestMessages(prefix)
 	messages = append(messages, provider.Message{Role: provider.RoleUser, Content: compactionInstructionWithFocus(instructions)})
+	activeCheckpoint := purpose == summaryPurposeActiveCheckpoint
 	var schemas []provider.ToolSchema
-	if a.svc.tools != nil {
+	// Active checkpoints omit unusable schemas; history summaries retain the
+	// cache-aligned request shape.
+	if a.svc.tools != nil && !activeCheckpoint {
 		schemas = a.svc.tools.Schemas()
+	}
+	maxTokens := summaryOutputMaxTokens
+	if activeCheckpoint {
+		maxTokens = activeTurnSummaryMaxTokens
 	}
 	return provider.Request{
 		Messages:    messages,
 		Tools:       schemas,
-		MaxTokens:   summaryOutputMaxTokens,
+		MaxTokens:   maxTokens,
 		Temperature: provider.OptionalTemperature(a.temperature),
 	}
+}
+
+func (a *Agent) summaryOutputEnvelope(purpose summaryPurpose) (desired, minimum int) {
+	minimum = 256
+	desired = summaryOutputMaxTokens
+	if purpose != summaryPurposeActiveCheckpoint {
+		return desired, minimum
+	}
+	// Keep the emergency checkpoint compact, but do not derive its output limit
+	// from a percentage of the context window. requestBudget is the single source
+	// of truth for provider limits and the actual shared-window headroom.
+	return activeTurnSummaryMaxTokens, minimum
+}
+
+func (a *Agent) applySummaryAdmission(req *provider.Request, purpose summaryPurpose) error {
+	if a == nil || req == nil {
+		return nil
+	}
+	desired, minimum := a.summaryOutputEnvelope(purpose)
+	budget := a.requestBudget(*req, desired, minimum)
+	if budget.EffectiveWindow > 0 && budget.EffectiveOutput < budget.MinimumOutput {
+		return irreducible(IrreducibleSummaryRequestTooLarge, budget,
+			fmt.Sprintf("estimated summary prompt %d leaves %d output tokens", budget.EstimatedPrompt, budget.EffectiveOutput))
+	}
+	if budget.EffectiveOutput > 0 {
+		req.MaxTokens = budget.EffectiveOutput
+	}
+	return nil
 }
 
 // summarize asks the executor's own provider to distill a replayed prefix into
 // a briefing. instructions is optional /compact focus + PreCompact text.
 // Named returns so defer can attach RequestCount and still return usage.
 func (a *Agent) summarize(ctx context.Context, region []provider.Message, instructions string) (summary string, usage *provider.Usage, err error) {
+	return a.summarizeForPurpose(ctx, region, instructions, summaryPurposeHistory)
+}
+
+func (a *Agent) summarizeForPurpose(ctx context.Context, region []provider.Message, instructions string, purpose summaryPurpose) (summary string, usage *provider.Usage, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	ctx = provider.WithRequestAttemptCounter(ctx)
@@ -399,18 +499,22 @@ func (a *Agent) summarize(ctx context.Context, region []provider.Message, instru
 		}
 	}()
 	defer trackPublishedHostStream(ctx, cancel)()
-	req := a.summaryRequest(region, instructions)
-	if err := a.applyAdmissionToRequest(&req); err != nil {
+	req := a.summaryRequestForPurpose(region, instructions, purpose)
+	err = a.applySummaryAdmission(&req, purpose)
+	if err != nil {
 		return "", usage, err
 	}
 	if req.MaxTokens > summaryOutputMaxTokens {
 		req.MaxTokens = summaryOutputMaxTokens
 	}
 	if req.MaxTokens < 256 {
-		return "", usage, fmt.Errorf("summary output budget too small (%d tokens)", req.MaxTokens)
+		budget := a.requestBudget(req, req.MaxTokens, 256)
+		return "", usage, irreducible(IrreducibleSummaryRequestTooLarge, budget,
+			fmt.Sprintf("summary output budget too small (%d tokens)", req.MaxTokens))
 	}
 	if a.svc.prov == nil {
-		return "", usage, fmt.Errorf("summary unavailable")
+		budget := a.requestBudget(req, req.MaxTokens, 256)
+		return "", usage, irreducible(IrreducibleSummarizerUnavailable, budget, "summary provider is unavailable")
 	}
 	ch, err := a.svc.prov.Stream(ctx, req)
 	if err != nil {
@@ -425,8 +529,16 @@ func (a *Agent) summarize(ctx context.Context, region []provider.Message, instru
 			return "", usage, ctx.Err()
 		case chunk, ok := <-ch:
 			if !ok {
-				if usage != nil && usage.FinishReason == "length" {
-					return "", usage, fmt.Errorf("%w: provider reached the output token limit", errSummaryOutputTruncated)
+				finishReason := ""
+				if usage != nil {
+					finishReason = usage.FinishReason
+				}
+				if admissionErr := admitCompletion(finishReason); admissionErr != nil {
+					detail := fmt.Sprintf("provider ended with non-committable finish reason %q", finishReason)
+					if finishReason == "length" {
+						detail = "provider reached the output token limit"
+					}
+					return "", usage, fmt.Errorf("%w: %s: %w", errSummaryOutputTruncated, detail, admissionErr)
 				}
 				s := strings.TrimSpace(b.String())
 				if s == "" {
@@ -451,6 +563,10 @@ func (a *Agent) summarize(ctx context.Context, region []provider.Message, instru
 // with no second attempt.
 func (a *Agent) summarizeOnce(ctx context.Context, fold []provider.Message, instructions string) (string, *provider.Usage, error) {
 	return a.summarize(ctx, fold, instructions)
+}
+
+func (a *Agent) summarizeOnceForPurpose(ctx context.Context, fold []provider.Message, instructions string, purpose summaryPurpose) (string, *provider.Usage, error) {
+	return a.summarizeForPurpose(ctx, fold, instructions, purpose)
 }
 
 // renderTranscript flattens messages into a readable transcript for summarization.

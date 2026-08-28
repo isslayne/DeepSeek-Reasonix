@@ -194,7 +194,7 @@ func TestGuardianRollbackAfterRewriteDropsReasoningOnlyRetryTail(t *testing.T) {
 
 	compactedWithEvidence := []provider.Message{
 		{Role: provider.RoleSystem, Content: PolicyPrompt()},
-		{Role: provider.RoleUser, Content: "<compaction-summary>\ncompacted reviews\n</compaction-summary>"},
+		{Role: provider.RoleUser, Content: "<compaction-summary>\ncompacted reviews\n</compaction-summary>", ProjectionKind: "history_checkpoint"},
 		{Role: provider.RoleAssistant, Content: `{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"preserved verdict"}`},
 		{Role: provider.RoleUser, Content: "review the current action"},
 		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "read-1", Name: "read_file", Arguments: `{"path":"policy.md"}`}}},
@@ -504,7 +504,7 @@ func TestGuardianSessionAlternatesAfterCompaction(t *testing.T) {
 	last := reqs[len(reqs)-1]
 	hasDigest := false
 	for i, m := range last.Messages {
-		if agent.IsCompactionSummary(m) {
+		if strings.HasPrefix(strings.TrimSpace(m.Content), "<compaction-summary>") {
 			hasDigest = true
 		}
 		if i > 0 && m.Role == provider.RoleUser && last.Messages[i-1].Role == provider.RoleUser {

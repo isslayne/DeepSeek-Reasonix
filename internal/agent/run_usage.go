@@ -276,6 +276,13 @@ func (a *Agent) emitTurnUsage(usage *provider.Usage, cacheDiagnostics *CacheDiag
 	if a.sess.output.lastUsage.Load() == nil && usage.PromptTokens > 0 {
 		a.storeLatestRequestUsage(usage)
 	}
+	if cacheDiagnostics == nil {
+		cacheDiagnostics = &CacheDiagnostics{}
+	}
+	a.sess.compactionMu.Lock()
+	cacheDiagnostics.ProjectionGeneration = a.sess.compactionState.ProjectionGeneration
+	cacheDiagnostics.CacheGeneration = a.sess.compactionState.CacheGeneration
+	a.sess.compactionMu.Unlock()
 	e := event.Event{Kind: event.Usage, ModelRef: a.modelRef, Usage: usage, Pricing: a.svc.pricing,
 		UsageSource:      a.usageSource,
 		CacheDiagnostics: cacheDiagnostics,
